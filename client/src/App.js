@@ -22,6 +22,11 @@ ChartJS.register(
   Legend
 );
 
+// Get the base URL for API calls
+const API_BASE_URL = process.env.NODE_ENV === 'production' 
+  ? '' // Empty string means same domain
+  : 'http://localhost:5000'; // Development server
+
 function App() {
   const [symbol, setSymbol] = useState('');
   const [data, setData] = useState(null);
@@ -34,10 +39,13 @@ function App() {
     setError(null);
     
     try {
-      const response = await axios.get(`/api/mentions?symbol=${symbol}`);
+      console.log('Fetching data for symbol:', symbol);
+      const response = await axios.get(`${API_BASE_URL}/api/mentions?symbol=${symbol}`);
+      console.log('API Response:', response.data);
       setData(response.data);
     } catch (err) {
-      setError('Failed to fetch data. Please try again.');
+      console.error('API Error:', err.response || err);
+      setError(err.response?.data?.error || 'Failed to fetch data. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -107,6 +115,13 @@ function App() {
         {data && (
           <div className="chart-container">
             <Line data={chartData} options={options} />
+            {data.totalMentions && (
+              <div className="stats">
+                <p>Total mentions: {data.totalMentions}</p>
+                <p>Data source: {data.source}</p>
+                <p>Time period: {data.period}</p>
+              </div>
+            )}
           </div>
         )}
       </main>
