@@ -86,8 +86,10 @@ function App() {
     setError(null);
     
     try {
-      // Use test endpoint first
-      const response = await axios.get(`${API_BASE_URL}/api/test-mentions`);
+      // Try the new v2 endpoint
+      const response = await axios.get(`${API_BASE_URL}/api/v2/mentions`, {
+        params: { symbol }
+      });
       setData(response.data);
     } catch (err) {
       console.error('API Error:', err.message);

@@ -553,6 +553,73 @@ app.get('/api/test-mentions', async (req, res) => {
   res.json(testData);
 });
 
+// Combined endpoint that tries Twitter API first, falls back to test data
+app.get('/api/v2/mentions', async (req, res) => {
+  console.log('V2 Mentions endpoint called with params:', req.query);
+  
+  const symbol = req.query.symbol;
+  if (!symbol) {
+    return res.status(400).json({ error: 'Symbol is required' });
+  }
+
+  // Format the symbol
+  const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
+  console.log('Formatted symbol:', formattedSymbol);
+
+  try {
+    // Try to get real Twitter data
+    console.log('Attempting to fetch Twitter data...');
+    const tweets = await twitterClient.v2.tweetCountsRecent(formattedSymbol, {
+      granularity: 'hour',
+      start_time: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() // Last 24 hours
+    });
+
+    console.log('Twitter API response:', {
+      meta: tweets.meta,
+      dataLength: tweets.data?.length
+    });
+
+    if (tweets.data && tweets.data.length > 0) {
+      const processedData = tweets.data.map(d => ({
+        timestamp: d.end,
+        count: d.tweet_count
+      }));
+
+      const totalMentions = processedData.reduce((sum, d) => sum + d.count, 0);
+
+      return res.json({
+        timestamps: processedData.map(d => d.timestamp),
+        counts: processedData.map(d => d.count),
+        totalMentions,
+        source: 'twitter',
+        period: '24 hours'
+      });
+    }
+  } catch (error) {
+    console.log('Twitter API error, falling back to test data:', error.message);
+  }
+
+  // If we get here, either there was an error or no data was found
+  // Return test data as fallback
+  const testData = {
+    timestamps: [
+      new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 4 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
+      new Date().toISOString()
+    ],
+    counts: [10, 15, 20, 25, 30, 35, 40],
+    totalMentions: 175,
+    source: 'test (Twitter API unavailable)',
+    period: '6 hours'
+  };
+
+  res.json(testData);
+});
+
 // Serve static files from the React app
 app.use(express.static(path.join(__dirname, 'client/build')));
 
