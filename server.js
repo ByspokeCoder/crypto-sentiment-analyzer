@@ -125,7 +125,6 @@ async function cacheData(symbol, count, timestamp) {
 // API endpoint to get mentions
 app.get('/api/mentions', async (req, res) => {
   console.log('Received request for mentions with query:', req.query);
-  console.log('Request headers:', req.headers);
   
   const symbol = req.query.symbol;
   if (!symbol) {
@@ -144,19 +143,11 @@ app.get('/api/mentions', async (req, res) => {
       });
     }
 
-    console.log('Twitter credentials status:', {
-      hasApiKey: !!process.env.TWITTER_API_KEY,
-      hasApiSecret: !!process.env.TWITTER_API_SECRET,
-      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
-      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
-    });
-    
     // Format the symbol to ensure it starts with $
     const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
     const symbolWithoutDollar = symbol.startsWith('$') ? symbol.substring(1) : symbol;
     
     console.log('Formatted symbol:', formattedSymbol);
-    console.log('Symbol without dollar:', symbolWithoutDollar);
 
     // Check cache first
     const cachedData = await getCachedData(formattedSymbol);
@@ -181,43 +172,59 @@ app.get('/api/mentions', async (req, res) => {
       });
     }
 
-    // Build search query
-    const query = `(${formattedSymbol} OR ${symbolWithoutDollar}) -is:retweet lang:en`;
-    console.log('Fetching tweet counts for query:', query);
-
     try {
-      const counts = await twitterClient.v2.tweetCountsRecent(query, {
-        granularity: 'hour',
-        start_time: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-        end_time: new Date().toISOString()
+      // Build search query
+      const query = `(${formattedSymbol} OR ${symbolWithoutDollar}) -is:retweet lang:en`;
+      console.log('Searching tweets with query:', query);
+
+      // Get tweets from the last 7 days
+      const endTime = new Date();
+      const startTime = new Date(endTime - 7 * 24 * 60 * 60 * 1000);
+      
+      // Search tweets and count them by hour
+      const tweets = await twitterClient.v2.search(query, {
+        'tweet.fields': ['created_at'],
+        'max_results': 100,
+        'start_time': startTime.toISOString(),
+        'end_time': endTime.toISOString()
       });
 
-      console.log('Twitter API Response:', {
-        hasData: !!counts.data,
-        dataLength: counts.data ? counts.data.length : 0,
-        meta: counts.meta
-      });
+      // Process tweets into hourly counts
+      const hourlyData = new Map();
+      const hourlyTimestamps = [];
+      
+      // Generate all hour timestamps for the last 7 days
+      for (let time = new Date(startTime); time <= endTime; time.setHours(time.getHours() + 1)) {
+        const timestamp = new Date(time).toISOString();
+        hourlyTimestamps.push(timestamp);
+        hourlyData.set(timestamp, 0);
+      }
 
-      if (!counts.data || counts.data.length === 0) {
-        return res.status(404).json({ 
-          error: `No mentions found for ${symbolWithoutDollar}`,
-          details: 'The symbol might be too new or not frequently mentioned',
-          query: query
+      // Count tweets by hour
+      if (tweets.data) {
+        tweets.data.forEach(tweet => {
+          const tweetTime = new Date(tweet.created_at);
+          tweetTime.setMinutes(0, 0, 0);
+          const hourKey = tweetTime.toISOString();
+          hourlyData.set(hourKey, (hourlyData.get(hourKey) || 0) + 1);
         });
       }
 
-      // Process and cache the counts
-      const sortedData = counts.data
-        .sort((a, b) => new Date(a.start) - new Date(b.start));
+      // Convert to sorted arrays
+      const sortedData = hourlyTimestamps.map(timestamp => ({
+        timestamp,
+        count: hourlyData.get(timestamp) || 0
+      }));
 
+      // Cache the data
       for (const dataPoint of sortedData) {
-        await cacheData(formattedSymbol, dataPoint.tweet_count, new Date(dataPoint.start));
+        await cacheData(formattedSymbol, dataPoint.count, new Date(dataPoint.timestamp));
       }
 
       const response = {
-        timestamps: sortedData.map(d => new Date(d.start).toISOString()),
-        counts: sortedData.map(d => d.tweet_count),
-        totalMentions: sortedData.reduce((sum, d) => sum + d.tweet_count, 0),
+        timestamps: sortedData.map(d => d.timestamp),
+        counts: sortedData.map(d => d.count),
+        totalMentions: sortedData.reduce((sum, d) => sum + d.count, 0),
         source: 'twitter',
         period: '7 days'
       };
@@ -294,17 +301,9 @@ app.get('/api/test', async (req, res) => {
       accessSecret: process.env.TWITTER_ACCESS_SECRET,
     });
 
-    // Test tweet counts endpoint (what we actually use)
-    console.log('Testing tweet counts endpoint...');
-    const testQuery = '$BTC';
-    const counts = await testClient.v2.tweetCountsRecent(testQuery, {
-      granularity: 'hour',
-      start_time: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), // Last 24 hours
-      end_time: new Date().toISOString()
-    });
-
-    // Test search endpoint as backup
+    // Test search endpoint
     console.log('Testing search endpoint...');
+    const testQuery = '$BTC';
     const tweets = await testClient.v2.search(testQuery, {
       'tweet.fields': ['created_at'],
       max_results: 10
@@ -313,14 +312,10 @@ app.get('/api/test', async (req, res) => {
     res.json({
       success: true,
       credentials,
-      countsEndpoint: {
-        working: !!counts.data,
-        dataPoints: counts.data?.length || 0,
-        meta: counts.meta
-      },
       searchEndpoint: {
         working: !!tweets.data,
-        tweetsFound: tweets.data?.length || 0
+        tweetsFound: tweets.data?.length || 0,
+        meta: tweets.meta
       }
     });
 
