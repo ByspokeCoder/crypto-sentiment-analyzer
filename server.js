@@ -328,18 +328,23 @@ async function cacheData(symbol, count, timestamp) {
 
 // API endpoint to get mentions
 app.get('/api/mentions', async (req, res) => {
-  const symbol = req.query.symbol;
-  if (!symbol) {
-    return res.status(400).json({ error: 'Symbol is required' });
-  }
-
+  console.log('Mentions endpoint called with params:', req.query);
+  let client;
   try {
+    const symbol = req.query.symbol;
+    if (!symbol) {
+      return res.status(400).json({ error: 'Symbol is required' });
+    }
+
     // Format the symbol
     const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
+    console.log('Formatted symbol:', formattedSymbol);
     
     // Check cache first
+    console.log('Checking cache...');
     const cachedData = await getCachedData(formattedSymbol, 1);
     if (cachedData.length > 0) {
+      console.log('Returning cached data');
       return res.json({
         timestamps: cachedData.map(d => d.timestamp),
         counts: cachedData.map(d => d.count),
@@ -350,8 +355,10 @@ app.get('/api/mentions', async (req, res) => {
     }
 
     // Check rate limit
+    console.log('Checking rate limit...');
     const rateLimitStatus = await checkRateLimit();
     if (!rateLimitStatus.canMakeRequest) {
+      console.log('Rate limit in effect:', rateLimitStatus);
       return res.status(429).json({ 
         error: 'Rate limit exceeded',
         resetTime: rateLimitStatus.resetTime.toISOString(),
@@ -362,75 +369,93 @@ app.get('/api/mentions', async (req, res) => {
       });
     }
 
-    // Make API request with minimal query
-    const query = `${formattedSymbol} -is:retweet`;
-    const tweets = await twitterClient.v2.search(query, {
-      'tweet.fields': ['created_at'],
-      'max_results': 5, // Minimal results
-      'start_time': new Date(Date.now() - 30 * 60 * 1000).toISOString(), // Last 30 minutes
-      'end_time': new Date().toISOString()
-    });
-
-    // Process into 5-minute intervals
-    const intervalData = new Map();
-    const now = new Date();
-    const startTime = new Date(now - 30 * 60 * 1000);
-
-    // Initialize with zero counts
-    for (let time = new Date(startTime); time <= now; time.setMinutes(time.getMinutes() + 5)) {
-      intervalData.set(new Date(time).toISOString(), 0);
-    }
-
-    // Count tweets
-    if (tweets.data) {
-      tweets.data.forEach(tweet => {
-        const tweetTime = new Date(tweet.created_at);
-        tweetTime.setMinutes(Math.floor(tweetTime.getMinutes() / 5) * 5, 0, 0);
-        const timeKey = tweetTime.toISOString();
-        intervalData.set(timeKey, (intervalData.get(timeKey) || 0) + 1);
+    // Make API request
+    console.log('Making Twitter API request...');
+    try {
+      const tweets = await twitterClient.v2.tweetCountsRecent(formattedSymbol, {
+        granularity: 'hour',
+        start_time: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
       });
+
+      console.log('Twitter API response received:', {
+        meta: tweets.meta,
+        dataLength: tweets.data?.length
+      });
+
+      if (!tweets.data || tweets.data.length === 0) {
+        return res.json({
+          timestamps: [],
+          counts: [],
+          totalMentions: 0,
+          source: 'twitter',
+          period: '7 days',
+          message: 'No mentions found in the last 7 days'
+        });
+      }
+
+      // Process the data
+      const processedData = tweets.data.map(d => ({
+        timestamp: d.end,
+        count: d.tweet_count
+      }));
+
+      // Cache results
+      console.log('Caching results...');
+      for (const dataPoint of processedData) {
+        await cacheData(formattedSymbol, dataPoint.count, new Date(dataPoint.timestamp));
+      }
+
+      return res.json({
+        timestamps: processedData.map(d => d.timestamp),
+        counts: processedData.map(d => d.count),
+        totalMentions: processedData.reduce((sum, d) => sum + d.count, 0),
+        source: 'twitter',
+        period: '7 days'
+      });
+
+    } catch (twitterError) {
+      console.error('Twitter API Error:', {
+        message: twitterError.message,
+        code: twitterError.code,
+        data: twitterError.data,
+        stack: twitterError.stack
+      });
+
+      if (twitterError.code === 429) {
+        const rateLimitStatus = await checkRateLimit();
+        const resetTime = await setRateLimit(rateLimitStatus.attempts);
+        const waitSeconds = Math.max(0, Math.ceil((resetTime - new Date()) / 1000));
+        
+        return res.status(429).json({
+          error: 'Rate limit exceeded',
+          resetTime: resetTime.toISOString(),
+          waitSeconds: waitSeconds,
+          waitTime: getHumanReadableDuration(waitSeconds),
+          message: `Please wait ${getHumanReadableDuration(waitSeconds)} before trying again.`,
+          nextAttempt: resetTime.toISOString()
+        });
+      }
+      
+      throw twitterError; // Let the main error handler deal with other errors
     }
-
-    // Convert to arrays
-    const sortedData = Array.from(intervalData.entries())
-      .sort(([a], [b]) => new Date(a) - new Date(b))
-      .map(([timestamp, count]) => ({ timestamp, count }));
-
-    // Cache results
-    for (const dataPoint of sortedData) {
-      await cacheData(formattedSymbol, dataPoint.count, new Date(dataPoint.timestamp));
-    }
-
-    res.json({
-      timestamps: sortedData.map(d => d.timestamp),
-      counts: sortedData.map(d => d.count),
-      totalMentions: sortedData.reduce((sum, d) => sum + d.count, 0),
-      source: 'twitter',
-      period: '30 minutes'
-    });
 
   } catch (error) {
-    console.error('API Error:', error);
-    
-    if (error.code === 429) {
-      const rateLimitStatus = await checkRateLimit();
-      const resetTime = await setRateLimit(rateLimitStatus.attempts);
-      const waitSeconds = Math.max(0, Math.ceil((resetTime - new Date()) / 1000));
-      
-      return res.status(429).json({
-        error: 'Rate limit exceeded',
-        resetTime: resetTime.toISOString(),
-        waitSeconds: waitSeconds,
-        waitTime: getHumanReadableDuration(waitSeconds),
-        message: `Please wait ${getHumanReadableDuration(waitSeconds)} before trying again.`,
-        nextAttempt: resetTime.toISOString()
-      });
-    }
+    console.error('Mentions endpoint error:', {
+      message: error.message,
+      code: error.code,
+      data: error.data,
+      stack: error.stack
+    });
     
     res.status(500).json({ 
       error: 'Failed to fetch data',
-      details: error.message
+      message: error.message,
+      details: error.data || 'No additional details available'
     });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
