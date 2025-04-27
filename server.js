@@ -301,6 +301,13 @@ async function initializeDatabase() {
       );
     `);
     console.log('Database initialized successfully');
+
+    // Clear any existing rate limits on startup
+    await pool.query(`
+      DELETE FROM rate_limits 
+      WHERE key = 'twitter_rate_limit'
+    `);
+    console.log('Rate limits cleared on startup');
   } catch (error) {
     console.error('Error initializing database:', error);
   }
