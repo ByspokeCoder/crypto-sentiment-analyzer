@@ -46,7 +46,47 @@ async function getCachedData(symbol, hours = 168) { // Cache for 1 week
   }
 }
 
-// Helper function to check rate limits with more detailed tracking
+// Helper function to calculate next reset time with exponential backoff
+function calculateResetTime(attempts) {
+  const baseDelay = 15 * 60; // 15 minutes base delay
+  const maxDelay = 24 * 60 * 60; // Max 24 hours
+  const delay = Math.min(baseDelay * Math.pow(2, attempts), maxDelay);
+  return new Date(Date.now() + (delay * 1000));
+}
+
+// Status endpoint to check API availability
+app.get('/api/status', async (req, res) => {
+  try {
+    const rateLimitStatus = await checkRateLimit();
+    if (!rateLimitStatus.canMakeRequest) {
+      return res.json({
+        status: 'rate_limited',
+        resetTime: rateLimitStatus.resetTime,
+        waitSeconds: rateLimitStatus.waitSeconds,
+        message: `Please wait ${Math.ceil(rateLimitStatus.waitSeconds / 60)} minutes before making new requests.`
+      });
+    }
+
+    // Check if we have cached data for a common symbol
+    const btcData = await getCachedData('$BTC', 1);
+    
+    res.json({
+      status: 'available',
+      hasCachedData: btcData.length > 0,
+      message: 'API is available for requests',
+      cachedSymbols: btcData.length > 0 ? ['$BTC'] : []
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Error checking API status',
+      error: error.message
+    });
+  }
+});
+
+// Helper function to check rate limits with exponential backoff
 async function checkRateLimit() {
   try {
     const rateLimitKey = 'twitter_rate_limit';
@@ -67,33 +107,39 @@ async function checkRateLimit() {
         return {
           canMakeRequest: false,
           resetTime,
-          waitSeconds: Math.ceil((resetTime - now) / 1000)
+          waitSeconds: Math.ceil((resetTime - now) / 1000),
+          attempts: limit.attempts
         };
       }
     }
-    return { canMakeRequest: true };
+    return { canMakeRequest: true, attempts: 0 };
   } catch (error) {
     console.error('Error checking rate limit:', error);
-    return { canMakeRequest: true };
+    return { canMakeRequest: false, attempts: 0 };
   }
 }
 
-// Helper function to set rate limit with attempt tracking
-async function setRateLimit(resetTimestamp) {
+// Helper function to set rate limit with exponential backoff
+async function setRateLimit(resetTimestamp, currentAttempts = 0) {
   try {
     const rateLimitKey = 'twitter_rate_limit';
+    const nextAttempts = currentAttempts + 1;
+    const resetTime = calculateResetTime(nextAttempts);
+    
     const query = `
       INSERT INTO rate_limits (key, value, updated_at, attempts)
-      VALUES ($1, $2, NOW(), 1)
+      VALUES ($1, $2, NOW(), $3)
       ON CONFLICT (key) 
       DO UPDATE SET 
         value = $2, 
         updated_at = NOW(),
-        attempts = rate_limits.attempts + 1
+        attempts = $3
     `;
-    await pool.query(query, [rateLimitKey, new Date(resetTimestamp * 1000).toISOString()]);
+    await pool.query(query, [rateLimitKey, resetTime.toISOString(), nextAttempts]);
+    return resetTime;
   } catch (error) {
     console.error('Error setting rate limit:', error);
+    return new Date(Date.now() + (15 * 60 * 1000)); // Default 15 min if error
   }
 }
 
@@ -150,10 +196,9 @@ app.get('/api/mentions', async (req, res) => {
     // Format the symbol
     const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
     
-    // Check cache first with shorter duration for active development
-    const cachedData = await getCachedData(formattedSymbol, 1); // Cache for 1 hour during development
+    // Check cache first
+    const cachedData = await getCachedData(formattedSymbol, 1);
     if (cachedData.length > 0) {
-      console.log('Returning cached data for:', formattedSymbol);
       return res.json({
         timestamps: cachedData.map(d => d.timestamp),
         counts: cachedData.map(d => d.count),
@@ -167,43 +212,44 @@ app.get('/api/mentions', async (req, res) => {
     const rateLimitStatus = await checkRateLimit();
     if (!rateLimitStatus.canMakeRequest) {
       return res.status(429).json({ 
-        error: 'Rate limit exceeded. Please try again later.',
+        error: 'Rate limit exceeded',
         resetTime: rateLimitStatus.resetTime,
-        waitSeconds: rateLimitStatus.waitSeconds
+        waitSeconds: rateLimitStatus.waitSeconds,
+        message: `Please wait ${Math.ceil(rateLimitStatus.waitSeconds / 60)} minutes before trying again.`
       });
     }
 
-    // Make API request
-    const query = `${formattedSymbol} -is:retweet lang:en`;
+    // Make API request with minimal query
+    const query = `${formattedSymbol} -is:retweet`;
     const tweets = await twitterClient.v2.search(query, {
       'tweet.fields': ['created_at'],
-      'max_results': 10, // Reduced for testing
-      'start_time': new Date(Date.now() - 60 * 60 * 1000).toISOString(), // Last hour
+      'max_results': 5, // Minimal results
+      'start_time': new Date(Date.now() - 30 * 60 * 1000).toISOString(), // Last 30 minutes
       'end_time': new Date().toISOString()
     });
 
-    // Process hourly counts
-    const hourlyData = new Map();
+    // Process into 5-minute intervals
+    const intervalData = new Map();
     const now = new Date();
-    const startTime = new Date(now - 60 * 60 * 1000); // 1 hour ago
+    const startTime = new Date(now - 30 * 60 * 1000);
 
     // Initialize with zero counts
-    for (let time = new Date(startTime); time <= now; time.setMinutes(time.getMinutes() + 15)) {
-      hourlyData.set(new Date(time).toISOString(), 0);
+    for (let time = new Date(startTime); time <= now; time.setMinutes(time.getMinutes() + 5)) {
+      intervalData.set(new Date(time).toISOString(), 0);
     }
 
     // Count tweets
     if (tweets.data) {
       tweets.data.forEach(tweet => {
         const tweetTime = new Date(tweet.created_at);
-        tweetTime.setMinutes(Math.floor(tweetTime.getMinutes() / 15) * 15, 0, 0);
+        tweetTime.setMinutes(Math.floor(tweetTime.getMinutes() / 5) * 5, 0, 0);
         const timeKey = tweetTime.toISOString();
-        hourlyData.set(timeKey, (hourlyData.get(timeKey) || 0) + 1);
+        intervalData.set(timeKey, (intervalData.get(timeKey) || 0) + 1);
       });
     }
 
     // Convert to arrays
-    const sortedData = Array.from(hourlyData.entries())
+    const sortedData = Array.from(intervalData.entries())
       .sort(([a], [b]) => new Date(a) - new Date(b))
       .map(([timestamp, count]) => ({ timestamp, count }));
 
@@ -217,19 +263,21 @@ app.get('/api/mentions', async (req, res) => {
       counts: sortedData.map(d => d.count),
       totalMentions: sortedData.reduce((sum, d) => sum + d.count, 0),
       source: 'twitter',
-      period: '1 hour'
+      period: '30 minutes'
     });
 
   } catch (error) {
     console.error('API Error:', error);
     
     if (error.code === 429) {
-      // Set rate limit and return specific message
-      const resetTime = error.rateLimit?.reset ? error.rateLimit.reset : Math.floor(Date.now() / 1000) + 900; // 15 minutes default
-      await setRateLimit(resetTime);
+      const rateLimitStatus = await checkRateLimit();
+      const resetTime = await setRateLimit(Date.now(), rateLimitStatus.attempts);
+      
       return res.status(429).json({
-        error: 'Rate limit exceeded. Please try again later.',
-        resetTime: new Date(resetTime * 1000).toISOString()
+        error: 'Rate limit exceeded',
+        resetTime: resetTime.toISOString(),
+        waitSeconds: Math.ceil((resetTime - new Date()) / 1000),
+        message: `Please wait ${Math.ceil((resetTime - new Date()) / 1000 / 60)} minutes before trying again.`
       });
     }
     
