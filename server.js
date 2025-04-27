@@ -266,40 +266,82 @@ app.get('/api/mentions', async (req, res) => {
 app.get('/api/test', async (req, res) => {
   try {
     console.log('Testing Twitter API connection...');
-    console.log('API Keys present:', {
+    
+    // Check if credentials exist
+    const credentials = {
       hasApiKey: !!process.env.TWITTER_API_KEY,
       hasApiSecret: !!process.env.TWITTER_API_SECRET,
       hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
       hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+    };
+
+    console.log('Credentials status:', credentials);
+
+    // If any credentials are missing, return early
+    if (!Object.values(credentials).every(Boolean)) {
+      return res.status(500).json({
+        success: false,
+        error: 'Missing Twitter API credentials',
+        credentials
+      });
+    }
+
+    // Try to initialize a new client
+    const testClient = new TwitterApi({
+      appKey: process.env.TWITTER_API_KEY,
+      appSecret: process.env.TWITTER_API_SECRET,
+      accessToken: process.env.TWITTER_ACCESS_TOKEN,
+      accessSecret: process.env.TWITTER_ACCESS_SECRET,
     });
 
-    // Test search with a common term
+    // Test tweet counts endpoint (what we actually use)
+    console.log('Testing tweet counts endpoint...');
     const testQuery = '$BTC';
-    const tweets = await twitterClient.v2.search(testQuery, {
-      'tweet.fields': ['created_at', 'text'],
+    const counts = await testClient.v2.tweetCountsRecent(testQuery, {
+      granularity: 'hour',
+      start_time: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), // Last 24 hours
+      end_time: new Date().toISOString()
+    });
+
+    // Test search endpoint as backup
+    console.log('Testing search endpoint...');
+    const tweets = await testClient.v2.search(testQuery, {
+      'tweet.fields': ['created_at'],
       max_results: 10
     });
 
     res.json({
       success: true,
-      credentials: {
-        hasApiKey: !!process.env.TWITTER_API_KEY,
-        hasApiSecret: !!process.env.TWITTER_API_SECRET,
-        hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
-        hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+      credentials,
+      countsEndpoint: {
+        working: !!counts.data,
+        dataPoints: counts.data?.length || 0,
+        meta: counts.meta
       },
-      testQuery,
-      tweetsFound: tweets.data ? tweets.data.length : 0,
-      sampleTweet: tweets.data && tweets.data.length > 0 ? tweets.data[0].text : null
+      searchEndpoint: {
+        working: !!tweets.data,
+        tweetsFound: tweets.data?.length || 0
+      }
     });
 
   } catch (error) {
-    console.error('Twitter API test error:', error);
+    console.error('Twitter API test error:', {
+      message: error.message,
+      code: error.code,
+      data: error.data,
+      stack: error.stack
+    });
+
     res.status(500).json({
       success: false,
       error: error.message,
       code: error.code,
-      details: error
+      type: error.constructor.name,
+      details: {
+        message: error.message,
+        code: error.code,
+        data: error.data
+      }
     });
   }
 });
