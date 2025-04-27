@@ -67,12 +67,19 @@ function getHumanReadableDuration(seconds) {
 
 // Status endpoint to check API availability
 app.get('/api/status', async (req, res) => {
+  console.log('Status endpoint called at:', new Date().toISOString());
   try {
     // First check if database is accessible
+    console.log('Checking database connection...');
     try {
       await pool.query('SELECT NOW()');
+      console.log('Database connection successful');
     } catch (dbError) {
-      console.error('Database connection error:', dbError);
+      console.error('Database connection error:', {
+        message: dbError.message,
+        code: dbError.code,
+        stack: dbError.stack
+      });
       return res.status(503).json({
         status: 'error',
         message: 'Database connection error',
@@ -82,6 +89,7 @@ app.get('/api/status', async (req, res) => {
     }
 
     // Direct database query to get current rate limit status without affecting it
+    console.log('Checking rate limit status...');
     const rateLimitKey = 'twitter_rate_limit';
     const query = `
       SELECT value, updated_at, attempts 
@@ -90,14 +98,24 @@ app.get('/api/status', async (req, res) => {
     `;
     
     const result = await pool.query(query, [rateLimitKey]);
+    console.log('Rate limit query result:', result.rows);
     const now = new Date();
 
     if (result.rows.length > 0) {
       const limit = result.rows[0];
       const resetTime = new Date(limit.value);
+      console.log('Found rate limit entry:', {
+        resetTime: resetTime.toISOString(),
+        now: now.toISOString(),
+        isLimited: resetTime > now
+      });
       
       if (resetTime > now) {
         const waitSeconds = Math.max(0, Math.ceil((resetTime - now) / 1000));
+        console.log('Rate limit is active:', {
+          waitSeconds,
+          waitTime: getHumanReadableDuration(waitSeconds)
+        });
         return res.json({
           status: 'rate_limited',
           resetTime: resetTime.toISOString(),
@@ -110,14 +128,17 @@ app.get('/api/status', async (req, res) => {
     }
 
     // Check Twitter API credentials
+    console.log('Checking Twitter API credentials...');
     const credentials = {
       hasApiKey: !!process.env.TWITTER_API_KEY,
       hasApiSecret: !!process.env.TWITTER_API_SECRET,
       hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
       hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
     };
+    console.log('Credentials status:', credentials);
 
     if (!Object.values(credentials).every(Boolean)) {
+      console.log('Missing Twitter API credentials');
       return res.status(503).json({
         status: 'error',
         message: 'Missing Twitter API credentials',
@@ -127,8 +148,14 @@ app.get('/api/status', async (req, res) => {
     }
 
     // Check if we have cached data for a common symbol
+    console.log('Checking for cached BTC data...');
     const btcData = await getCachedData('$BTC', 1);
+    console.log('Cache check complete:', {
+      hasCachedData: btcData.length > 0,
+      cachedDataPoints: btcData.length
+    });
     
+    console.log('Status check completed successfully');
     res.json({
       status: 'available',
       hasCachedData: btcData.length > 0,
@@ -138,7 +165,12 @@ app.get('/api/status', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Status check error:', error);
+    console.error('Status check error:', {
+      message: error.message,
+      code: error.code,
+      stack: error.stack,
+      type: error.constructor.name
+    });
     res.status(500).json({
       status: 'error',
       message: 'Error checking API status',
