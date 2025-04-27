@@ -68,19 +68,30 @@ function getHumanReadableDuration(seconds) {
 // Status endpoint to check API availability
 app.get('/api/status', async (req, res) => {
   try {
-    const rateLimitStatus = await checkRateLimit();
+    // Direct database query to get current rate limit status without affecting it
+    const rateLimitKey = 'twitter_rate_limit';
+    const query = `
+      SELECT value, updated_at, attempts 
+      FROM rate_limits 
+      WHERE key = $1
+    `;
+    const result = await pool.query(query, [rateLimitKey]);
     const now = new Date();
 
-    if (!rateLimitStatus.canMakeRequest) {
-      // Don't update the rate limit on status checks
-      return res.json({
-        status: 'rate_limited',
-        resetTime: rateLimitStatus.resetTime,
-        waitSeconds: Math.max(0, Math.ceil((rateLimitStatus.resetTime - now) / 1000)),
-        waitTime: getHumanReadableDuration(Math.max(0, Math.ceil((rateLimitStatus.resetTime - now) / 1000))),
-        message: `API is rate limited. Please wait ${getHumanReadableDuration(Math.max(0, Math.ceil((rateLimitStatus.resetTime - now) / 1000)))} before making new requests.`,
-        nextAttempt: rateLimitStatus.resetTime.toISOString()
-      });
+    if (result.rows.length > 0) {
+      const limit = result.rows[0];
+      const resetTime = new Date(limit.value);
+      
+      if (resetTime > now) {
+        return res.json({
+          status: 'rate_limited',
+          resetTime: resetTime.toISOString(),
+          waitSeconds: Math.max(0, Math.ceil((resetTime - now) / 1000)),
+          waitTime: getHumanReadableDuration(Math.max(0, Math.ceil((resetTime - now) / 1000))),
+          message: `API is rate limited. Please wait ${getHumanReadableDuration(Math.max(0, Math.ceil((resetTime - now) / 1000)))} before making new requests.`,
+          nextAttempt: resetTime.toISOString()
+        });
+      }
     }
 
     // Check if we have cached data for a common symbol
