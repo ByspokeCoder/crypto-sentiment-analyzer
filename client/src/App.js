@@ -39,12 +39,21 @@ function App() {
     setError(null);
     
     try {
-      console.log('Fetching data for symbol:', symbol);
-      const response = await axios.get(`${API_BASE_URL}/api/mentions?symbol=${symbol}`);
+      const requestUrl = `${API_BASE_URL}/api/mentions?symbol=${encodeURIComponent(symbol)}`;
+      console.log('Making API request to:', requestUrl);
+      console.log('Current environment:', process.env.NODE_ENV);
+      console.log('API base URL:', API_BASE_URL);
+      
+      const response = await axios.get(requestUrl);
       console.log('API Response:', response.data);
       setData(response.data);
     } catch (err) {
-      console.error('API Error:', err.response || err);
+      console.error('API Error details:', {
+        message: err.message,
+        response: err.response?.data,
+        status: err.response?.status,
+        headers: err.response?.headers
+      });
       setError(err.response?.data?.error || 'Failed to fetch data. Please try again.');
     } finally {
       setLoading(false);

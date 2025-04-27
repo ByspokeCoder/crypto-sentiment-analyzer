@@ -124,12 +124,26 @@ async function cacheData(symbol, count, timestamp) {
 
 // API endpoint to get mentions
 app.get('/api/mentions', async (req, res) => {
-  try {
-    const { symbol } = req.query;
-    if (!symbol) {
-      return res.status(400).json({ error: 'Symbol is required' });
-    }
+  console.log('Received request for mentions with query:', req.query);
+  console.log('Request headers:', req.headers);
+  
+  const symbol = req.query.symbol;
+  if (!symbol) {
+    console.log('No symbol provided in request');
+    return res.status(400).json({ error: 'Symbol is required' });
+  }
 
+  try {
+    console.log('Checking Twitter API credentials...');
+    console.log('Bearer token present:', !!process.env.TWITTER_BEARER_TOKEN);
+    
+    // Format the symbol to ensure it starts with $
+    const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
+    const symbolWithoutDollar = symbol.startsWith('$') ? symbol.substring(1) : symbol;
+    
+    console.log('Formatted symbol:', formattedSymbol);
+    console.log('Symbol without dollar:', symbolWithoutDollar);
+    
     // Log API credentials status
     console.log('API Configuration:', {
       hasApiKey: !!process.env.TWITTER_API_KEY,
@@ -138,10 +152,6 @@ app.get('/api/mentions', async (req, res) => {
       hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET,
       symbol: symbol
     });
-
-    // Format symbol and check cache first
-    const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
-    const symbolWithoutDollar = symbol.startsWith('$') ? symbol.substring(1) : symbol;
 
     // Check cache first
     const cachedData = await getCachedData(formattedSymbol);
@@ -230,38 +240,13 @@ app.get('/api/mentions', async (req, res) => {
     res.json(response);
 
   } catch (error) {
-    console.error('Detailed error:', {
+    console.error('Error in /api/mentions:', error);
+    console.error('Error details:', {
       message: error.message,
-      code: error.code,
       stack: error.stack,
-      type: error.constructor.name
+      response: error.response?.data
     });
-    
-    if (error.code === 429) {
-      if (error.rateLimit) {
-        await setRateLimit(error.rateLimit.reset);
-      }
-      return res.status(429).json({ 
-        error: 'Rate limit exceeded. Please try again in a few minutes.',
-        resetTime: error.rateLimit ? new Date(error.rateLimit.reset * 1000) : null
-      });
-    } else if (error.code === 401) {
-      return res.status(401).json({
-        error: 'Twitter API authentication failed. Please check API credentials.',
-        details: error.message
-      });
-    } else if (error.code === 403) {
-      return res.status(403).json({
-        error: 'Access to Twitter API forbidden. Please check API access levels.',
-        details: error.message
-      });
-    }
-    
-    res.status(500).json({ 
-      error: 'Failed to fetch data. Please try again.',
-      errorType: error.constructor.name,
-      details: error.message
-    });
+    res.status(500).json({ error: 'Failed to fetch data. Please try again.' });
   }
 });
 
