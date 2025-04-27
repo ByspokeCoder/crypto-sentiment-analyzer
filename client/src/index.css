@@ -31,6 +31,13 @@ h1 {
   font-size: 0.9em;
 }
 
+.status-note {
+  font-size: 0.8em;
+  font-style: italic;
+  opacity: 0.8;
+  margin-top: 5px;
+}
+
 .api-status.available {
   background-color: #d4edda;
   color: #155724;

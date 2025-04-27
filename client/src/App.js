@@ -171,7 +171,13 @@ function App() {
           <div className={`api-status ${apiStatus.status}`}>
             <p>{apiStatus.message}</p>
             {apiStatus.status === 'rate_limited' && (
-              <p>Next attempt available: {new Date(apiStatus.nextAttempt).toLocaleTimeString()}</p>
+              <>
+                <p>Next attempt available: {new Date(apiStatus.nextAttempt).toLocaleTimeString()}</p>
+                <p className="status-note">(Status updates automatically)</p>
+              </>
+            )}
+            {apiStatus.status === 'available' && (
+              <p className="status-note">Ready to analyze crypto mentions</p>
             )}
           </div>
         )}

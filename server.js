@@ -72,14 +72,14 @@ app.get('/api/status', async (req, res) => {
     const now = new Date();
 
     if (!rateLimitStatus.canMakeRequest) {
-      const waitSeconds = Math.max(0, Math.ceil((rateLimitStatus.resetTime - now) / 1000));
+      // Don't update the rate limit on status checks
       return res.json({
         status: 'rate_limited',
         resetTime: rateLimitStatus.resetTime,
-        waitSeconds: waitSeconds,
-        waitTime: getHumanReadableDuration(waitSeconds),
-        message: `API is rate limited. Please wait ${getHumanReadableDuration(waitSeconds)} before making new requests.`,
-        nextAttempt: new Date(now.getTime() + (waitSeconds * 1000)).toISOString()
+        waitSeconds: Math.max(0, Math.ceil((rateLimitStatus.resetTime - now) / 1000)),
+        waitTime: getHumanReadableDuration(Math.max(0, Math.ceil((rateLimitStatus.resetTime - now) / 1000))),
+        message: `API is rate limited. Please wait ${getHumanReadableDuration(Math.max(0, Math.ceil((rateLimitStatus.resetTime - now) / 1000)))} before making new requests.`,
+        nextAttempt: rateLimitStatus.resetTime.toISOString()
       });
     }
 
@@ -140,17 +140,18 @@ async function checkRateLimit() {
   } catch (error) {
     console.error('Error checking rate limit:', error);
     // Default to rate limited for safety
+    const defaultResetTime = new Date(Date.now() + (15 * 60 * 1000));
     return { 
       canMakeRequest: false, 
       attempts: 0,
-      resetTime: new Date(Date.now() + (15 * 60 * 1000)), // 15 min default
+      resetTime: defaultResetTime,
       waitSeconds: 900
     };
   }
 }
 
 // Helper function to set rate limit with exponential backoff
-async function setRateLimit(resetTimestamp, currentAttempts = 0) {
+async function setRateLimit(currentAttempts = 0) {
   try {
     const rateLimitKey = 'twitter_rate_limit';
     const nextAttempts = (currentAttempts || 0) + 1;
@@ -241,14 +242,13 @@ app.get('/api/mentions', async (req, res) => {
     // Check rate limit
     const rateLimitStatus = await checkRateLimit();
     if (!rateLimitStatus.canMakeRequest) {
-      const waitSeconds = Math.max(0, rateLimitStatus.waitSeconds);
       return res.status(429).json({ 
         error: 'Rate limit exceeded',
-        resetTime: rateLimitStatus.resetTime,
-        waitSeconds: waitSeconds,
-        waitTime: getHumanReadableDuration(waitSeconds),
-        message: `Please wait ${getHumanReadableDuration(waitSeconds)} before trying again.`,
-        nextAttempt: new Date(Date.now() + (waitSeconds * 1000)).toISOString()
+        resetTime: rateLimitStatus.resetTime.toISOString(),
+        waitSeconds: rateLimitStatus.waitSeconds,
+        waitTime: getHumanReadableDuration(rateLimitStatus.waitSeconds),
+        message: `Please wait ${getHumanReadableDuration(rateLimitStatus.waitSeconds)} before trying again.`,
+        nextAttempt: rateLimitStatus.resetTime.toISOString()
       });
     }
 
@@ -304,7 +304,7 @@ app.get('/api/mentions', async (req, res) => {
     
     if (error.code === 429) {
       const rateLimitStatus = await checkRateLimit();
-      const resetTime = await setRateLimit(Date.now(), rateLimitStatus.attempts);
+      const resetTime = await setRateLimit(rateLimitStatus.attempts);
       const waitSeconds = Math.max(0, Math.ceil((resetTime - new Date()) / 1000));
       
       return res.status(429).json({
@@ -313,7 +313,7 @@ app.get('/api/mentions', async (req, res) => {
         waitSeconds: waitSeconds,
         waitTime: getHumanReadableDuration(waitSeconds),
         message: `Please wait ${getHumanReadableDuration(waitSeconds)} before trying again.`,
-        nextAttempt: new Date(Date.now() + (waitSeconds * 1000)).toISOString()
+        nextAttempt: resetTime.toISOString()
       });
     }
     
