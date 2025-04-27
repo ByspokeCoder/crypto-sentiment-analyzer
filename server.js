@@ -130,6 +130,15 @@ app.get('/api/mentions', async (req, res) => {
       return res.status(400).json({ error: 'Symbol is required' });
     }
 
+    // Log API credentials status
+    console.log('API Configuration:', {
+      hasApiKey: !!process.env.TWITTER_API_KEY,
+      hasApiSecret: !!process.env.TWITTER_API_SECRET,
+      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET,
+      symbol: symbol
+    });
+
     // Format symbol and check cache first
     const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
     const symbolWithoutDollar = symbol.startsWith('$') ? symbol.substring(1) : symbol;
@@ -137,6 +146,7 @@ app.get('/api/mentions', async (req, res) => {
     // Check cache first
     const cachedData = await getCachedData(formattedSymbol);
     if (cachedData.length > 0) {
+      console.log('Returning cached data for:', formattedSymbol);
       return res.json({
         timestamps: cachedData.map(d => d.timestamp),
         counts: cachedData.map(d => d.count),
@@ -147,6 +157,7 @@ app.get('/api/mentions', async (req, res) => {
     // Check rate limit before making Twitter API call
     const canMakeRequest = await checkRateLimit();
     if (!canMakeRequest) {
+      console.log('Rate limit in effect');
       return res.status(429).json({ 
         error: 'Rate limit exceeded. Please try again later.',
         cached: false
@@ -158,17 +169,34 @@ app.get('/api/mentions', async (req, res) => {
     console.log('Fetching tweet counts for query:', query);
 
     // Get counts for the last 7 days (168 hours)
+    const endTime = new Date();
+    const startTime = new Date(endTime - 7 * 24 * 60 * 60 * 1000);
+
+    console.log('Requesting counts between:', {
+      start: startTime.toISOString(),
+      end: endTime.toISOString()
+    });
+
     const counts = await twitterClient.v2.tweetCountsRecent(query, {
       granularity: 'hour',
-      start_time: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+      start_time: startTime.toISOString(),
+      end_time: endTime.toISOString()
+    });
+
+    console.log('Twitter API Response:', {
+      hasData: !!counts.data,
+      dataLength: counts.data ? counts.data.length : 0,
+      meta: counts.meta
     });
 
     // If we get a rate limit response, store it
     if (counts.rateLimit) {
+      console.log('Rate limit info:', counts.rateLimit);
       await setRateLimit(counts.rateLimit.reset);
     }
 
     if (!counts.data || counts.data.length === 0) {
+      console.log('No data found for query:', query);
       return res.status(404).json({ 
         error: `No mentions found for ${symbolWithoutDollar}. The symbol might be too new or not frequently mentioned.`,
         searchQuery: query
@@ -176,6 +204,7 @@ app.get('/api/mentions', async (req, res) => {
     }
 
     // Process and cache the counts
+    console.log('Processing counts data...');
     for (const dataPoint of counts.data) {
       const timestamp = new Date(dataPoint.start);
       await cacheData(formattedSymbol, dataPoint.tweet_count, timestamp);
@@ -185,19 +214,30 @@ app.get('/api/mentions', async (req, res) => {
     const sortedData = counts.data
       .sort((a, b) => new Date(a.start) - new Date(b.start));
 
-    res.json({
+    const response = {
       timestamps: sortedData.map(d => new Date(d.start).toISOString()),
       counts: sortedData.map(d => d.tweet_count),
       totalMentions: sortedData.reduce((sum, d) => sum + d.tweet_count, 0),
       source: 'twitter',
       period: '7 days'
+    };
+
+    console.log('Sending response:', {
+      dataPoints: response.timestamps.length,
+      totalMentions: response.totalMentions
     });
 
+    res.json(response);
+
   } catch (error) {
-    console.error('Error fetching mention counts:', error);
+    console.error('Detailed error:', {
+      message: error.message,
+      code: error.code,
+      stack: error.stack,
+      type: error.constructor.name
+    });
     
     if (error.code === 429) {
-      // Store rate limit info if available
       if (error.rateLimit) {
         await setRateLimit(error.rateLimit.reset);
       }
@@ -205,10 +245,21 @@ app.get('/api/mentions', async (req, res) => {
         error: 'Rate limit exceeded. Please try again in a few minutes.',
         resetTime: error.rateLimit ? new Date(error.rateLimit.reset * 1000) : null
       });
+    } else if (error.code === 401) {
+      return res.status(401).json({
+        error: 'Twitter API authentication failed. Please check API credentials.',
+        details: error.message
+      });
+    } else if (error.code === 403) {
+      return res.status(403).json({
+        error: 'Access to Twitter API forbidden. Please check API access levels.',
+        details: error.message
+      });
     }
     
     res.status(500).json({ 
       error: 'Failed to fetch data. Please try again.',
+      errorType: error.constructor.name,
       details: error.message
     });
   }
