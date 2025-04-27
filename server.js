@@ -134,8 +134,22 @@ app.get('/api/mentions', async (req, res) => {
   }
 
   try {
-    console.log('Checking Twitter API credentials...');
-    console.log('Bearer token present:', !!process.env.TWITTER_BEARER_TOKEN);
+    // Verify Twitter credentials are present
+    if (!process.env.TWITTER_API_KEY || !process.env.TWITTER_API_SECRET || 
+        !process.env.TWITTER_ACCESS_TOKEN || !process.env.TWITTER_ACCESS_SECRET) {
+      console.error('Missing Twitter API credentials');
+      return res.status(500).json({ 
+        error: 'Twitter API credentials are not properly configured',
+        details: 'Missing required Twitter API credentials'
+      });
+    }
+
+    console.log('Twitter credentials status:', {
+      hasApiKey: !!process.env.TWITTER_API_KEY,
+      hasApiSecret: !!process.env.TWITTER_API_SECRET,
+      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+    });
     
     // Format the symbol to ensure it starts with $
     const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
@@ -143,15 +157,6 @@ app.get('/api/mentions', async (req, res) => {
     
     console.log('Formatted symbol:', formattedSymbol);
     console.log('Symbol without dollar:', symbolWithoutDollar);
-    
-    // Log API credentials status
-    console.log('API Configuration:', {
-      hasApiKey: !!process.env.TWITTER_API_KEY,
-      hasApiSecret: !!process.env.TWITTER_API_SECRET,
-      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
-      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET,
-      symbol: symbol
-    });
 
     // Check cache first
     const cachedData = await getCachedData(formattedSymbol);
@@ -160,7 +165,9 @@ app.get('/api/mentions', async (req, res) => {
       return res.json({
         timestamps: cachedData.map(d => d.timestamp),
         counts: cachedData.map(d => d.count),
-        source: 'cache'
+        totalMentions: cachedData.reduce((sum, d) => sum + d.count, 0),
+        source: 'cache',
+        period: '7 days'
       });
     }
 
@@ -178,75 +185,80 @@ app.get('/api/mentions', async (req, res) => {
     const query = `(${formattedSymbol} OR ${symbolWithoutDollar}) -is:retweet lang:en`;
     console.log('Fetching tweet counts for query:', query);
 
-    // Get counts for the last 7 days (168 hours)
-    const endTime = new Date();
-    const startTime = new Date(endTime - 7 * 24 * 60 * 60 * 1000);
-
-    console.log('Requesting counts between:', {
-      start: startTime.toISOString(),
-      end: endTime.toISOString()
-    });
-
-    const counts = await twitterClient.v2.tweetCountsRecent(query, {
-      granularity: 'hour',
-      start_time: startTime.toISOString(),
-      end_time: endTime.toISOString()
-    });
-
-    console.log('Twitter API Response:', {
-      hasData: !!counts.data,
-      dataLength: counts.data ? counts.data.length : 0,
-      meta: counts.meta
-    });
-
-    // If we get a rate limit response, store it
-    if (counts.rateLimit) {
-      console.log('Rate limit info:', counts.rateLimit);
-      await setRateLimit(counts.rateLimit.reset);
-    }
-
-    if (!counts.data || counts.data.length === 0) {
-      console.log('No data found for query:', query);
-      return res.status(404).json({ 
-        error: `No mentions found for ${symbolWithoutDollar}. The symbol might be too new or not frequently mentioned.`,
-        searchQuery: query
+    try {
+      const counts = await twitterClient.v2.tweetCountsRecent(query, {
+        granularity: 'hour',
+        start_time: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+        end_time: new Date().toISOString()
       });
+
+      console.log('Twitter API Response:', {
+        hasData: !!counts.data,
+        dataLength: counts.data ? counts.data.length : 0,
+        meta: counts.meta
+      });
+
+      if (!counts.data || counts.data.length === 0) {
+        return res.status(404).json({ 
+          error: `No mentions found for ${symbolWithoutDollar}`,
+          details: 'The symbol might be too new or not frequently mentioned',
+          query: query
+        });
+      }
+
+      // Process and cache the counts
+      const sortedData = counts.data
+        .sort((a, b) => new Date(a.start) - new Date(b.start));
+
+      for (const dataPoint of sortedData) {
+        await cacheData(formattedSymbol, dataPoint.tweet_count, new Date(dataPoint.start));
+      }
+
+      const response = {
+        timestamps: sortedData.map(d => new Date(d.start).toISOString()),
+        counts: sortedData.map(d => d.tweet_count),
+        totalMentions: sortedData.reduce((sum, d) => sum + d.tweet_count, 0),
+        source: 'twitter',
+        period: '7 days'
+      };
+
+      res.json(response);
+
+    } catch (twitterError) {
+      console.error('Twitter API Error:', {
+        message: twitterError.message,
+        code: twitterError.code,
+        data: twitterError.data
+      });
+      
+      if (twitterError.code === 401) {
+        return res.status(500).json({
+          error: 'Twitter API authentication failed',
+          details: 'Invalid credentials or token expired'
+        });
+      } else if (twitterError.code === 429) {
+        return res.status(429).json({
+          error: 'Twitter API rate limit exceeded',
+          details: 'Please try again later'
+        });
+      } else {
+        return res.status(500).json({
+          error: 'Twitter API error',
+          details: twitterError.message
+        });
+      }
     }
-
-    // Process and cache the counts
-    console.log('Processing counts data...');
-    for (const dataPoint of counts.data) {
-      const timestamp = new Date(dataPoint.start);
-      await cacheData(formattedSymbol, dataPoint.tweet_count, timestamp);
-    }
-
-    // Format the response
-    const sortedData = counts.data
-      .sort((a, b) => new Date(a.start) - new Date(b.start));
-
-    const response = {
-      timestamps: sortedData.map(d => new Date(d.start).toISOString()),
-      counts: sortedData.map(d => d.tweet_count),
-      totalMentions: sortedData.reduce((sum, d) => sum + d.tweet_count, 0),
-      source: 'twitter',
-      period: '7 days'
-    };
-
-    console.log('Sending response:', {
-      dataPoints: response.timestamps.length,
-      totalMentions: response.totalMentions
-    });
-
-    res.json(response);
 
   } catch (error) {
-    console.error('Error in /api/mentions:', error);
-    console.error('Error details:', {
+    console.error('Server Error:', {
       message: error.message,
       stack: error.stack,
       response: error.response?.data
     });
-    res.status(500).json({ error: 'Failed to fetch data. Please try again.' });
+    res.status(500).json({ 
+      error: 'Server error occurred',
+      details: error.message
+    });
   }
 });
 
