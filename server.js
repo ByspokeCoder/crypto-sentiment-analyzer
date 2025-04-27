@@ -28,7 +28,61 @@ const pool = new Pool({
   }
 });
 
-// Initialize database
+// Helper function to get cached data with longer cache duration
+async function getCachedData(symbol, hours = 168) { // Cache for 1 week
+  const query = `
+    SELECT timestamp, count 
+    FROM mentions 
+    WHERE symbol = $1 
+      AND timestamp >= NOW() - INTERVAL '${hours} hours'
+    ORDER BY timestamp ASC
+  `;
+  const result = await pool.query(query, [symbol]);
+  return result.rows;
+}
+
+// Helper function to check rate limits
+async function checkRateLimit() {
+  try {
+    const rateLimitKey = 'twitter_rate_limit';
+    const query = `
+      SELECT value, updated_at 
+      FROM rate_limits 
+      WHERE key = $1
+    `;
+    const result = await pool.query(query, [rateLimitKey]);
+    
+    if (result.rows.length > 0) {
+      const limit = result.rows[0];
+      const resetTime = new Date(limit.value);
+      if (resetTime > new Date()) {
+        return false; // Still rate limited
+      }
+    }
+    return true; // Not rate limited
+  } catch (error) {
+    console.error('Error checking rate limit:', error);
+    return true; // Assume not rate limited on error
+  }
+}
+
+// Helper function to set rate limit
+async function setRateLimit(resetTimestamp) {
+  try {
+    const rateLimitKey = 'twitter_rate_limit';
+    const query = `
+      INSERT INTO rate_limits (key, value, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (key) 
+      DO UPDATE SET value = $2, updated_at = NOW()
+    `;
+    await pool.query(query, [rateLimitKey, new Date(resetTimestamp * 1000).toISOString()]);
+  } catch (error) {
+    console.error('Error setting rate limit:', error);
+  }
+}
+
+// Initialize database with rate limits table
 async function initializeDatabase() {
   try {
     await pool.query(`
@@ -42,6 +96,12 @@ async function initializeDatabase() {
       
       CREATE INDEX IF NOT EXISTS idx_mentions_symbol_timestamp 
       ON mentions(symbol, timestamp);
+
+      CREATE TABLE IF NOT EXISTS rate_limits (
+        key VARCHAR(50) PRIMARY KEY,
+        value TIMESTAMP NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
     `);
     console.log('Database initialized successfully');
   } catch (error) {
@@ -50,19 +110,6 @@ async function initializeDatabase() {
 }
 
 initializeDatabase();
-
-// Helper function to get cached data
-async function getCachedData(symbol, hours = 24) {
-  const query = `
-    SELECT timestamp, count 
-    FROM mentions 
-    WHERE symbol = $1 
-      AND timestamp >= NOW() - INTERVAL '${hours} hours'
-    ORDER BY timestamp ASC
-  `;
-  const result = await pool.query(query, [symbol]);
-  return result.rows;
-}
 
 // Helper function to cache new data
 async function cacheData(symbol, count, timestamp) {
@@ -83,20 +130,30 @@ app.get('/api/mentions', async (req, res) => {
       return res.status(400).json({ error: 'Symbol is required' });
     }
 
-    // Format symbol to ensure it starts with $ and handle both formats
+    // Format symbol and check cache first
     const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
     const symbolWithoutDollar = symbol.startsWith('$') ? symbol.substring(1) : symbol;
 
-    // First check cache
+    // Check cache first
     const cachedData = await getCachedData(formattedSymbol);
     if (cachedData.length > 0) {
       return res.json({
         timestamps: cachedData.map(d => d.timestamp),
-        counts: cachedData.map(d => d.count)
+        counts: cachedData.map(d => d.count),
+        source: 'cache'
       });
     }
 
-    // Build a more flexible search query
+    // Check rate limit before making Twitter API call
+    const canMakeRequest = await checkRateLimit();
+    if (!canMakeRequest) {
+      return res.status(429).json({ 
+        error: 'Rate limit exceeded. Please try again later.',
+        cached: false
+      });
+    }
+
+    // Build search query
     const query = `(${formattedSymbol} OR ${symbolWithoutDollar}) -is:retweet lang:en`;
     console.log('Searching Twitter with query:', query);
 
@@ -105,11 +162,12 @@ app.get('/api/mentions', async (req, res) => {
       max_results: 100
     });
 
-    console.log('Twitter API response:', {
-      dataExists: !!tweets.data,
-      count: tweets.data ? tweets.data.length : 0
-    });
+    // If we get a rate limit response, store it
+    if (tweets.rateLimit) {
+      await setRateLimit(tweets.rateLimit.reset);
+    }
 
+    // Process tweets and store results
     if (!tweets.data || tweets.data.length === 0) {
       return res.status(404).json({ 
         error: `No mentions found for ${symbolWithoutDollar}. The symbol might be too new or not frequently mentioned.`,
@@ -117,16 +175,10 @@ app.get('/api/mentions', async (req, res) => {
       });
     }
 
-    // Process tweets and count by hour
     const hourlyCount = new Map();
     let count = 0;
 
     for (const tweet of tweets.data) {
-      console.log('Processing tweet:', {
-        text: tweet.text.substring(0, 100),
-        created_at: tweet.created_at
-      });
-
       const tweetDate = new Date(tweet.created_at);
       const hourKey = new Date(
         tweetDate.getFullYear(),
@@ -142,40 +194,33 @@ app.get('/api/mentions', async (req, res) => {
       await cacheData(formattedSymbol, count, hourKey);
     }
 
-    // Format data for response
     const sortedData = Array.from(hourlyCount.entries())
       .sort(([a], [b]) => new Date(a) - new Date(b));
-
-    if (sortedData.length === 0) {
-      return res.status(404).json({ 
-        error: `Found tweets but couldn't process time data for ${symbolWithoutDollar}.`,
-        searchQuery: query
-      });
-    }
 
     res.json({
       timestamps: sortedData.map(([timestamp]) => timestamp),
       counts: sortedData.map(([, count]) => count),
       totalTweets: count,
-      searchQuery: query
+      source: 'twitter'
     });
 
   } catch (error) {
     console.error('Error fetching mentions:', error);
     
-    // Provide more specific error messages
     if (error.code === 429) {
-      return res.status(429).json({ error: 'Rate limit exceeded. Please try again later.' });
-    } else if (error.code === 401) {
-      return res.status(401).json({ error: 'Authentication error with Twitter API.' });
-    } else if (error.code === 'ECONNREFUSED') {
-      return res.status(503).json({ error: 'Cannot connect to Twitter API. Please try again later.' });
+      // Store rate limit info if available
+      if (error.rateLimit) {
+        await setRateLimit(error.rateLimit.reset);
+      }
+      return res.status(429).json({ 
+        error: 'Rate limit exceeded. Please try again in a few minutes.',
+        resetTime: error.rateLimit ? new Date(error.rateLimit.reset * 1000) : null
+      });
     }
     
     res.status(500).json({ 
       error: 'Failed to fetch data. Please try again.',
-      details: error.message,
-      searchQuery: query
+      details: error.message
     });
   }
 });
