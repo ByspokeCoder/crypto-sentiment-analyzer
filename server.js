@@ -83,8 +83,12 @@ app.get('/api/mentions', async (req, res) => {
       return res.status(400).json({ error: 'Symbol is required' });
     }
 
+    // Format symbol to ensure it starts with $ and handle both formats
+    const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
+    const symbolWithoutDollar = symbol.startsWith('$') ? symbol.substring(1) : symbol;
+
     // First check cache
-    const cachedData = await getCachedData(symbol);
+    const cachedData = await getCachedData(formattedSymbol);
     if (cachedData.length > 0) {
       return res.json({
         timestamps: cachedData.map(d => d.timestamp),
@@ -92,15 +96,37 @@ app.get('/api/mentions', async (req, res) => {
       });
     }
 
-    // If no cached data, fetch from Twitter
-    const now = new Date();
-    const tweets = await twitterClient.v2.search(`${symbol} -is:retweet`);
-    
+    // Build a more flexible search query
+    const query = `(${formattedSymbol} OR ${symbolWithoutDollar}) -is:retweet lang:en`;
+    console.log('Searching Twitter with query:', query);
+
+    const tweets = await twitterClient.v2.search(query, {
+      'tweet.fields': ['created_at', 'text'],
+      max_results: 100
+    });
+
+    console.log('Twitter API response:', {
+      dataExists: !!tweets.data,
+      count: tweets.data ? tweets.data.length : 0
+    });
+
+    if (!tweets.data || tweets.data.length === 0) {
+      return res.status(404).json({ 
+        error: `No mentions found for ${symbolWithoutDollar}. The symbol might be too new or not frequently mentioned.`,
+        searchQuery: query
+      });
+    }
+
     // Process tweets and count by hour
     const hourlyCount = new Map();
     let count = 0;
-    
-    for await (const tweet of tweets) {
+
+    for (const tweet of tweets.data) {
+      console.log('Processing tweet:', {
+        text: tweet.text.substring(0, 100),
+        created_at: tweet.created_at
+      });
+
       const tweetDate = new Date(tweet.created_at);
       const hourKey = new Date(
         tweetDate.getFullYear(),
@@ -113,21 +139,44 @@ app.get('/api/mentions', async (req, res) => {
       count++;
       
       // Cache the data
-      await cacheData(symbol, count, hourKey);
+      await cacheData(formattedSymbol, count, hourKey);
     }
 
     // Format data for response
     const sortedData = Array.from(hourlyCount.entries())
       .sort(([a], [b]) => new Date(a) - new Date(b));
 
+    if (sortedData.length === 0) {
+      return res.status(404).json({ 
+        error: `Found tweets but couldn't process time data for ${symbolWithoutDollar}.`,
+        searchQuery: query
+      });
+    }
+
     res.json({
       timestamps: sortedData.map(([timestamp]) => timestamp),
-      counts: sortedData.map(([, count]) => count)
+      counts: sortedData.map(([, count]) => count),
+      totalTweets: count,
+      searchQuery: query
     });
 
   } catch (error) {
     console.error('Error fetching mentions:', error);
-    res.status(500).json({ error: 'Failed to fetch mentions' });
+    
+    // Provide more specific error messages
+    if (error.code === 429) {
+      return res.status(429).json({ error: 'Rate limit exceeded. Please try again later.' });
+    } else if (error.code === 401) {
+      return res.status(401).json({ error: 'Authentication error with Twitter API.' });
+    } else if (error.code === 'ECONNREFUSED') {
+      return res.status(503).json({ error: 'Cannot connect to Twitter API. Please try again later.' });
+    }
+    
+    res.status(500).json({ 
+      error: 'Failed to fetch data. Please try again.',
+      details: error.message,
+      searchQuery: query
+    });
   }
 });
 
