@@ -155,57 +155,46 @@ app.get('/api/mentions', async (req, res) => {
 
     // Build search query
     const query = `(${formattedSymbol} OR ${symbolWithoutDollar}) -is:retweet lang:en`;
-    console.log('Searching Twitter with query:', query);
+    console.log('Fetching tweet counts for query:', query);
 
-    const tweets = await twitterClient.v2.search(query, {
-      'tweet.fields': ['created_at', 'text'],
-      max_results: 100
+    // Get counts for the last 7 days (168 hours)
+    const counts = await twitterClient.v2.tweetCountsRecent(query, {
+      granularity: 'hour',
+      start_time: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
     });
 
     // If we get a rate limit response, store it
-    if (tweets.rateLimit) {
-      await setRateLimit(tweets.rateLimit.reset);
+    if (counts.rateLimit) {
+      await setRateLimit(counts.rateLimit.reset);
     }
 
-    // Process tweets and store results
-    if (!tweets.data || tweets.data.length === 0) {
+    if (!counts.data || counts.data.length === 0) {
       return res.status(404).json({ 
         error: `No mentions found for ${symbolWithoutDollar}. The symbol might be too new or not frequently mentioned.`,
         searchQuery: query
       });
     }
 
-    const hourlyCount = new Map();
-    let count = 0;
-
-    for (const tweet of tweets.data) {
-      const tweetDate = new Date(tweet.created_at);
-      const hourKey = new Date(
-        tweetDate.getFullYear(),
-        tweetDate.getMonth(),
-        tweetDate.getDate(),
-        tweetDate.getHours()
-      );
-      
-      hourlyCount.set(hourKey.toISOString(), (hourlyCount.get(hourKey.toISOString()) || 0) + 1);
-      count++;
-      
-      // Cache the data
-      await cacheData(formattedSymbol, count, hourKey);
+    // Process and cache the counts
+    for (const dataPoint of counts.data) {
+      const timestamp = new Date(dataPoint.start);
+      await cacheData(formattedSymbol, dataPoint.tweet_count, timestamp);
     }
 
-    const sortedData = Array.from(hourlyCount.entries())
-      .sort(([a], [b]) => new Date(a) - new Date(b));
+    // Format the response
+    const sortedData = counts.data
+      .sort((a, b) => new Date(a.start) - new Date(b.start));
 
     res.json({
-      timestamps: sortedData.map(([timestamp]) => timestamp),
-      counts: sortedData.map(([, count]) => count),
-      totalTweets: count,
-      source: 'twitter'
+      timestamps: sortedData.map(d => new Date(d.start).toISOString()),
+      counts: sortedData.map(d => d.tweet_count),
+      totalMentions: sortedData.reduce((sum, d) => sum + d.tweet_count, 0),
+      source: 'twitter',
+      period: '7 days'
     });
 
   } catch (error) {
-    console.error('Error fetching mentions:', error);
+    console.error('Error fetching mention counts:', error);
     
     if (error.code === 429) {
       // Store rate limit info if available
