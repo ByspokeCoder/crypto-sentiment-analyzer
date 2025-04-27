@@ -9,8 +9,27 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' ? false : '*',
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
+
+// Add error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Global error handler:', {
+    message: err.message,
+    stack: err.stack,
+    type: err.constructor.name
+  });
+  res.status(500).json({
+    status: 'error',
+    message: 'Internal server error',
+    error: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  });
+});
 
 // Initialize Twitter client
 const twitterClient = new TwitterApi({
@@ -25,12 +44,39 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
     rejectUnauthorized: false
-  }
+  },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
+
+// Add pool error handler
+pool.on('error', (err, client) => {
+  console.error('Unexpected error on idle client', err);
+});
+
+// Test database connection on startup
+async function testDatabaseConnection() {
+  try {
+    const client = await pool.connect();
+    console.log('Database connection successful');
+    client.release();
+  } catch (err) {
+    console.error('Database connection error:', {
+      message: err.message,
+      code: err.code,
+      stack: err.stack
+    });
+  }
+}
+
+testDatabaseConnection();
 
 // Helper function to get cached data with longer cache duration
 async function getCachedData(symbol, hours = 168) { // Cache for 1 week
+  let client;
   try {
+    client = await pool.connect();
     const query = `
       SELECT timestamp, count 
       FROM mentions 
@@ -38,11 +84,19 @@ async function getCachedData(symbol, hours = 168) { // Cache for 1 week
         AND timestamp >= NOW() - INTERVAL '${hours} hours'
       ORDER BY timestamp ASC
     `;
-    const result = await pool.query(query, [symbol]);
+    const result = await client.query(query, [symbol]);
     return result.rows;
   } catch (error) {
-    console.error('Error getting cached data:', error);
+    console.error('Error getting cached data:', {
+      message: error.message,
+      code: error.code,
+      stack: error.stack
+    });
     return [];
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 }
 
@@ -67,26 +121,14 @@ function getHumanReadableDuration(seconds) {
 
 // Status endpoint to check API availability
 app.get('/api/status', async (req, res) => {
+  let client;
   console.log('Status endpoint called at:', new Date().toISOString());
   try {
     // First check if database is accessible
     console.log('Checking database connection...');
-    try {
-      await pool.query('SELECT NOW()');
-      console.log('Database connection successful');
-    } catch (dbError) {
-      console.error('Database connection error:', {
-        message: dbError.message,
-        code: dbError.code,
-        stack: dbError.stack
-      });
-      return res.status(503).json({
-        status: 'error',
-        message: 'Database connection error',
-        error: dbError.message,
-        currentTime: new Date().toISOString()
-      });
-    }
+    client = await pool.connect();
+    await client.query('SELECT NOW()');
+    console.log('Database connection successful');
 
     // Direct database query to get current rate limit status without affecting it
     console.log('Checking rate limit status...');
@@ -97,7 +139,7 @@ app.get('/api/status', async (req, res) => {
       WHERE key = $1
     `;
     
-    const result = await pool.query(query, [rateLimitKey]);
+    const result = await client.query(query, [rateLimitKey]);
     console.log('Rate limit query result:', result.rows);
     const now = new Date();
 
@@ -175,9 +217,16 @@ app.get('/api/status', async (req, res) => {
       status: 'error',
       message: 'Error checking API status',
       error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+      details: {
+        code: error.code,
+        type: error.constructor.name
+      },
       currentTime: new Date().toISOString()
     });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
