@@ -180,6 +180,48 @@ app.get('/api/mentions', async (req, res) => {
   }
 });
 
+// Test endpoint for Twitter API
+app.get('/api/test', async (req, res) => {
+  try {
+    console.log('Testing Twitter API connection...');
+    console.log('API Keys present:', {
+      hasApiKey: !!process.env.TWITTER_API_KEY,
+      hasApiSecret: !!process.env.TWITTER_API_SECRET,
+      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+    });
+
+    // Test search with a common term
+    const testQuery = '$BTC';
+    const tweets = await twitterClient.v2.search(testQuery, {
+      'tweet.fields': ['created_at', 'text'],
+      max_results: 10
+    });
+
+    res.json({
+      success: true,
+      credentials: {
+        hasApiKey: !!process.env.TWITTER_API_KEY,
+        hasApiSecret: !!process.env.TWITTER_API_SECRET,
+        hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+        hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+      },
+      testQuery,
+      tweetsFound: tweets.data ? tweets.data.length : 0,
+      sampleTweet: tweets.data && tweets.data.length > 0 ? tweets.data[0].text : null
+    });
+
+  } catch (error) {
+    console.error('Twitter API test error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      code: error.code,
+      details: error
+    });
+  }
+});
+
 // Serve static files from the React app
 app.use(express.static(path.join(__dirname, 'client/build')));
 
