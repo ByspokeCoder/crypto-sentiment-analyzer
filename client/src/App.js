@@ -33,17 +33,32 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [apiStatus, setApiStatus] = useState(null);
+  const [credentialsStatus, setCredentialsStatus] = useState(null);
   const [statusCheckInterval, setStatusCheckInterval] = useState(null);
 
-  // Check API status initially and when rate limited
+  // Check API and credentials status initially
   useEffect(() => {
     checkApiStatus();
+    checkCredentialsStatus();
     return () => {
       if (statusCheckInterval) {
         clearInterval(statusCheckInterval);
       }
     };
   }, []);
+
+  const checkCredentialsStatus = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/credentials-status`);
+      setCredentialsStatus(response.data);
+    } catch (error) {
+      console.error('Error checking credentials status:', error);
+      setCredentialsStatus({
+        status: 'error',
+        message: 'Unable to check credentials status'
+      });
+    }
+  };
 
   const checkApiStatus = async () => {
     try {
@@ -143,6 +158,12 @@ function App() {
     <div className="App">
       <header>
         <h1>Crypto Sentiment Analyzer</h1>
+        {credentialsStatus && credentialsStatus.status !== 'configured' && (
+          <div className="api-status error">
+            <p>⚠️ {credentialsStatus.message}</p>
+            <p className="status-note">Twitter API credentials need to be configured</p>
+          </div>
+        )}
         {apiStatus && (
           <div className={`api-status ${apiStatus.status}`}>
             <p>{apiStatus.message}</p>

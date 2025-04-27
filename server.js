@@ -615,6 +615,30 @@ app.get('/api/test-mentions', async (req, res) => {
 app.get('/api/v2/mentions', async (req, res) => {
   console.log('V2 Mentions endpoint called with params:', req.query);
   
+  // Check Twitter credentials first
+  const credentials = {
+    hasApiKey: !!process.env.TWITTER_API_KEY,
+    hasApiSecret: !!process.env.TWITTER_API_SECRET,
+    hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+    hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+  };
+  
+  const missingCredentials = Object.entries(credentials)
+    .filter(([_, hasValue]) => !hasValue)
+    .map(([key]) => key);
+
+  if (missingCredentials.length > 0) {
+    console.error('Missing Twitter credentials:', missingCredentials.join(', '));
+    return res.json({
+      timestamps: [new Date().toISOString()],
+      counts: [0],
+      totalMentions: 0,
+      source: 'error',
+      period: 'n/a',
+      error: `Twitter API credentials not configured. Missing: ${missingCredentials.join(', ')}`
+    });
+  }
+
   const symbol = req.query.symbol;
   if (!symbol) {
     return res.status(400).json({ error: 'Symbol is required' });
@@ -625,12 +649,6 @@ app.get('/api/v2/mentions', async (req, res) => {
   console.log('Formatted symbol:', formattedSymbol);
 
   // Log Twitter credentials status
-  const credentials = {
-    hasApiKey: !!process.env.TWITTER_API_KEY,
-    hasApiSecret: !!process.env.TWITTER_API_SECRET,
-    hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
-    hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
-  };
   console.log('Twitter credentials status:', credentials);
 
   try {
@@ -714,6 +732,29 @@ app.get('/api/v2/mentions', async (req, res) => {
   };
 
   res.json(testData);
+});
+
+// Add a credentials check endpoint
+app.get('/api/credentials-status', async (req, res) => {
+  const credentials = {
+    hasApiKey: !!process.env.TWITTER_API_KEY,
+    hasApiSecret: !!process.env.TWITTER_API_SECRET,
+    hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+    hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+  };
+
+  const missingCredentials = Object.entries(credentials)
+    .filter(([_, hasValue]) => !hasValue)
+    .map(([key]) => key);
+
+  res.json({
+    status: missingCredentials.length === 0 ? 'configured' : 'missing_credentials',
+    credentials,
+    missing: missingCredentials,
+    message: missingCredentials.length === 0 
+      ? 'Twitter API credentials are configured' 
+      : `Missing credentials: ${missingCredentials.join(', ')}`
+  });
 });
 
 // Serve static files from the React app
