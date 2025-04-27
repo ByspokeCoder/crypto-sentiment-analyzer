@@ -119,69 +119,6 @@ function getHumanReadableDuration(seconds) {
   }
 }
 
-// Status endpoint to check API availability
-app.get('/api/status', async (req, res) => {
-  console.log('Status endpoint called at:', new Date().toISOString());
-  try {
-    // Check Twitter API credentials first (no database required)
-    console.log('Checking Twitter API credentials...');
-    const credentials = {
-      hasApiKey: !!process.env.TWITTER_API_KEY,
-      hasApiSecret: !!process.env.TWITTER_API_SECRET,
-      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
-      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
-    };
-    console.log('Credentials status:', credentials);
-
-    if (!Object.values(credentials).every(Boolean)) {
-      return res.status(503).json({
-        status: 'error',
-        message: 'Missing Twitter API credentials',
-        details: credentials,
-        currentTime: new Date().toISOString()
-      });
-    }
-
-    // Simple database check
-    try {
-      console.log('Attempting simple database connection test...');
-      await pool.query('SELECT NOW()');
-      console.log('Database connection successful');
-    } catch (dbError) {
-      console.error('Database connection failed:', {
-        message: dbError.message,
-        code: dbError.code
-      });
-      return res.status(503).json({
-        status: 'error',
-        message: 'Database connection failed',
-        error: dbError.message,
-        currentTime: new Date().toISOString()
-      });
-    }
-
-    // If we get here, both basic checks passed
-    res.json({
-      status: 'available',
-      message: 'Basic connectivity checks passed',
-      currentTime: new Date().toISOString()
-    });
-
-  } catch (error) {
-    console.error('Status check error:', {
-      message: error.message,
-      code: error.code,
-      type: error.constructor.name
-    });
-    res.status(500).json({
-      status: 'error',
-      message: 'Error during basic connectivity check',
-      error: error.message,
-      currentTime: new Date().toISOString()
-    });
-  }
-});
-
 // Helper function to check rate limits with exponential backoff
 async function checkRateLimit() {
   try {
@@ -208,6 +145,8 @@ async function checkRateLimit() {
         };
       }
     }
+
+    // If no rate limit found or it's expired, allow the request
     return { 
       canMakeRequest: true, 
       attempts: 0,
@@ -216,16 +155,103 @@ async function checkRateLimit() {
     };
   } catch (error) {
     console.error('Error checking rate limit:', error);
-    // Default to rate limited for safety
-    const defaultResetTime = new Date(Date.now() + (15 * 60 * 1000));
+    // If there's an error checking rate limit, allow the request
     return { 
-      canMakeRequest: false, 
+      canMakeRequest: true, 
       attempts: 0,
-      resetTime: defaultResetTime,
-      waitSeconds: 900
+      resetTime: new Date(),
+      waitSeconds: 0
     };
   }
 }
+
+// Status endpoint to check API availability
+app.get('/api/status', async (req, res) => {
+  console.log('Status endpoint called at:', new Date().toISOString());
+  try {
+    // Check Twitter API credentials first
+    console.log('Checking Twitter API credentials...');
+    const credentials = {
+      hasApiKey: !!process.env.TWITTER_API_KEY,
+      hasApiSecret: !!process.env.TWITTER_API_SECRET,
+      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+    };
+    console.log('Credentials status:', credentials);
+
+    if (!Object.values(credentials).every(Boolean)) {
+      return res.status(503).json({
+        status: 'error',
+        message: 'Missing Twitter API credentials',
+        details: credentials,
+        currentTime: new Date().toISOString()
+      });
+    }
+
+    // Simple database check
+    try {
+      console.log('Attempting simple database connection test...');
+      await pool.query('SELECT NOW()');
+      console.log('Database connection successful');
+
+      // Check rate limit status but don't enforce it for status checks
+      const rateLimit = await checkRateLimit();
+      console.log('Rate limit status:', rateLimit);
+
+      res.json({
+        status: 'available',
+        message: 'API is available for requests',
+        currentTime: new Date().toISOString(),
+        rateLimit: rateLimit.canMakeRequest ? 'No rate limit in effect' : `Rate limited until ${rateLimit.resetTime.toISOString()}`
+      });
+    } catch (dbError) {
+      console.error('Database connection failed:', {
+        message: dbError.message,
+        code: dbError.code
+      });
+      return res.status(503).json({
+        status: 'error',
+        message: 'Database connection failed',
+        error: dbError.message,
+        currentTime: new Date().toISOString()
+      });
+    }
+
+  } catch (error) {
+    console.error('Status check error:', {
+      message: error.message,
+      code: error.code,
+      type: error.constructor.name
+    });
+    res.status(500).json({
+      status: 'error',
+      message: 'Error during basic connectivity check',
+      error: error.message,
+      currentTime: new Date().toISOString()
+    });
+  }
+});
+
+// Clear rate limit if it exists
+app.post('/api/reset-rate-limit', async (req, res) => {
+  try {
+    const query = `
+      DELETE FROM rate_limits 
+      WHERE key = 'twitter_rate_limit'
+    `;
+    await pool.query(query);
+    res.json({ 
+      status: 'success',
+      message: 'Rate limit reset successful'
+    });
+  } catch (error) {
+    console.error('Error resetting rate limit:', error);
+    res.status(500).json({ 
+      status: 'error',
+      message: 'Failed to reset rate limit'
+    });
+  }
+});
 
 // Helper function to set rate limit with exponential backoff
 async function setRateLimit(currentAttempts = 0) {
