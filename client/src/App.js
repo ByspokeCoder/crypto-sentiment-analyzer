@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Line } from 'react-chartjs-2';
 import axios from 'axios';
 import {
@@ -32,6 +32,53 @@ function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [apiStatus, setApiStatus] = useState(null);
+  const [statusCheckInterval, setStatusCheckInterval] = useState(null);
+
+  // Check API status initially and when rate limited
+  useEffect(() => {
+    checkApiStatus();
+    return () => {
+      if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+      }
+    };
+  }, []);
+
+  const checkApiStatus = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/status`);
+      setApiStatus(response.data);
+      
+      // If rate limited, schedule next check
+      if (response.data.status === 'rate_limited') {
+        // Check again 10 seconds after the reset time
+        const resetTime = new Date(response.data.resetTime);
+        const now = new Date();
+        const waitMs = resetTime - now + 10000; // Add 10 seconds buffer
+        
+        if (waitMs > 0) {
+          if (statusCheckInterval) {
+            clearInterval(statusCheckInterval);
+          }
+          const interval = setInterval(checkApiStatus, waitMs);
+          setStatusCheckInterval(interval);
+        }
+      } else {
+        // Clear any existing interval if API is available
+        if (statusCheckInterval) {
+          clearInterval(statusCheckInterval);
+          setStatusCheckInterval(null);
+        }
+      }
+    } catch (error) {
+      console.error('Error checking API status:', error);
+      setApiStatus({
+        status: 'error',
+        message: 'Unable to check API status'
+      });
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -39,22 +86,38 @@ function App() {
     setError(null);
     
     try {
-      const requestUrl = `${API_BASE_URL}/api/mentions?symbol=${encodeURIComponent(symbol)}`;
-      console.log('Making API request to:', requestUrl);
-      console.log('Current environment:', process.env.NODE_ENV);
-      console.log('API base URL:', API_BASE_URL);
-      
-      const response = await axios.get(requestUrl);
-      console.log('API Response:', response.data);
+      // Check API status first
+      const statusResponse = await axios.get(`${API_BASE_URL}/api/status`);
+      if (statusResponse.data.status === 'rate_limited') {
+        setError({
+          message: statusResponse.data.message,
+          waitTime: statusResponse.data.waitTime,
+          nextAttempt: new Date(statusResponse.data.nextAttempt)
+        });
+        setLoading(false);
+        return;
+      }
+
+      const response = await axios.get(`${API_BASE_URL}/api/mentions?symbol=${encodeURIComponent(symbol)}`);
       setData(response.data);
     } catch (err) {
       console.error('API Error details:', {
         message: err.message,
         response: err.response?.data,
-        status: err.response?.status,
-        headers: err.response?.headers
+        status: err.response?.status
       });
-      setError(err.response?.data?.error || 'Failed to fetch data. Please try again.');
+
+      if (err.response?.status === 429) {
+        // Rate limit hit, update status and schedule next check
+        await checkApiStatus();
+        setError({
+          message: err.response.data.message,
+          waitTime: err.response.data.waitTime,
+          nextAttempt: new Date(err.response.data.nextAttempt)
+        });
+      } else {
+        setError(err.response?.data?.error || 'Failed to fetch data. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -104,6 +167,14 @@ function App() {
     <div className="App">
       <header>
         <h1>Crypto Sentiment Analyzer</h1>
+        {apiStatus && (
+          <div className={`api-status ${apiStatus.status}`}>
+            <p>{apiStatus.message}</p>
+            {apiStatus.status === 'rate_limited' && (
+              <p>Next attempt available: {new Date(apiStatus.nextAttempt).toLocaleTimeString()}</p>
+            )}
+          </div>
+        )}
       </header>
       <main>
         <form onSubmit={handleSubmit}>
@@ -114,17 +185,27 @@ function App() {
             placeholder="Enter crypto symbol (e.g., $ETH)"
             required
           />
-          <button type="submit" disabled={loading}>
+          <button 
+            type="submit" 
+            disabled={loading || (apiStatus?.status === 'rate_limited')}
+          >
             {loading ? 'Loading...' : 'Analyze'}
           </button>
         </form>
         
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error">
+            <p>{error.message}</p>
+            {error.waitTime && (
+              <p>Next attempt available at: {new Date(error.nextAttempt).toLocaleTimeString()}</p>
+            )}
+          </div>
+        )}
         
         {data && (
           <div className="chart-container">
             <Line data={chartData} options={options} />
-            {data.totalMentions && (
+            {data.totalMentions !== undefined && (
               <div className="stats">
                 <p>Total mentions: {data.totalMentions}</p>
                 <p>Data source: {data.source}</p>
