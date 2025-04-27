@@ -86,38 +86,12 @@ function App() {
     setError(null);
     
     try {
-      // Check API status first
-      const statusResponse = await axios.get(`${API_BASE_URL}/api/status`);
-      if (statusResponse.data.status === 'rate_limited') {
-        setError({
-          message: statusResponse.data.message,
-          waitTime: statusResponse.data.waitTime,
-          nextAttempt: new Date(statusResponse.data.nextAttempt)
-        });
-        setLoading(false);
-        return;
-      }
-
-      const response = await axios.get(`${API_BASE_URL}/api/mentions?symbol=${encodeURIComponent(symbol)}`);
+      // Use test endpoint first
+      const response = await axios.get(`${API_BASE_URL}/api/test-mentions`);
       setData(response.data);
     } catch (err) {
-      console.error('API Error details:', {
-        message: err.message,
-        response: err.response?.data,
-        status: err.response?.status
-      });
-
-      if (err.response?.status === 429) {
-        // Rate limit hit, update status and schedule next check
-        await checkApiStatus();
-        setError({
-          message: err.response.data.message,
-          waitTime: err.response.data.waitTime,
-          nextAttempt: new Date(err.response.data.nextAttempt)
-        });
-      } else {
-        setError(err.response?.data?.error || 'Failed to fetch data. Please try again.');
-      }
+      console.error('API Error:', err.message);
+      setError('Failed to fetch data. Please try again.');
     } finally {
       setLoading(false);
     }

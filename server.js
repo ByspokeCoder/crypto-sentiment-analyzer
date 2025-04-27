@@ -531,6 +531,28 @@ app.get('/api/test', async (req, res) => {
   }
 });
 
+// Simple test endpoint
+app.get('/api/test-mentions', async (req, res) => {
+  // Static test data
+  const testData = {
+    timestamps: [
+      new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 4 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+      new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
+      new Date().toISOString()
+    ],
+    counts: [10, 15, 20, 25, 30, 35, 40],
+    totalMentions: 175,
+    source: 'test',
+    period: '6 hours'
+  };
+
+  res.json(testData);
+});
+
 // Serve static files from the React app
 app.use(express.static(path.join(__dirname, 'client/build')));
 
