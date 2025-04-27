@@ -32,12 +32,70 @@ app.use((err, req, res, next) => {
 });
 
 // Initialize Twitter client
-const twitterClient = new TwitterApi({
-  appKey: process.env.TWITTER_API_KEY,
-  appSecret: process.env.TWITTER_API_SECRET,
-  accessToken: process.env.TWITTER_ACCESS_TOKEN,
-  accessSecret: process.env.TWITTER_ACCESS_SECRET,
-});
+console.log('Checking Twitter API credentials on startup...');
+const twitterCredentials = {
+  hasApiKey: !!process.env.TWITTER_API_KEY,
+  hasApiSecret: !!process.env.TWITTER_API_SECRET,
+  hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+  hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+};
+console.log('Twitter credentials status:', twitterCredentials);
+
+let twitterClient = null;
+try {
+  if (Object.values(twitterCredentials).every(Boolean)) {
+    console.log('Initializing Twitter client...');
+    twitterClient = new TwitterApi({
+      appKey: process.env.TWITTER_API_KEY,
+      appSecret: process.env.TWITTER_API_SECRET,
+      accessToken: process.env.TWITTER_ACCESS_TOKEN,
+      accessSecret: process.env.TWITTER_ACCESS_SECRET,
+    });
+    console.log('Twitter client initialized successfully');
+  } else {
+    console.error('Missing Twitter credentials:', 
+      Object.entries(twitterCredentials)
+        .filter(([_, hasValue]) => !hasValue)
+        .map(([key]) => key)
+        .join(', ')
+    );
+  }
+} catch (error) {
+  console.error('Error initializing Twitter client:', {
+    message: error.message,
+    stack: error.stack
+  });
+}
+
+// Test Twitter client on startup
+async function testTwitterClient() {
+  if (!twitterClient) {
+    console.error('Twitter client not initialized, skipping test');
+    return;
+  }
+
+  try {
+    console.log('Testing Twitter client with a sample query...');
+    const testQuery = '$BTC -is:retweet';
+    const result = await twitterClient.v2.tweetCountsRecent(testQuery, {
+      granularity: 'hour',
+      start_time: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString() // Last hour only
+    });
+    console.log('Twitter test query successful:', {
+      meta: result.meta,
+      dataLength: result.data?.length
+    });
+  } catch (error) {
+    console.error('Twitter test query failed:', {
+      message: error.message,
+      code: error.code,
+      data: error.data
+    });
+  }
+}
+
+// Run the test after a short delay to ensure server is fully started
+setTimeout(testTwitterClient, 5000);
 
 // Initialize PostgreSQL connection
 const pool = new Pool({
