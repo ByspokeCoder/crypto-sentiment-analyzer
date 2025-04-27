@@ -68,6 +68,19 @@ function getHumanReadableDuration(seconds) {
 // Status endpoint to check API availability
 app.get('/api/status', async (req, res) => {
   try {
+    // First check if database is accessible
+    try {
+      await pool.query('SELECT NOW()');
+    } catch (dbError) {
+      console.error('Database connection error:', dbError);
+      return res.status(503).json({
+        status: 'error',
+        message: 'Database connection error',
+        error: dbError.message,
+        currentTime: new Date().toISOString()
+      });
+    }
+
     // Direct database query to get current rate limit status without affecting it
     const rateLimitKey = 'twitter_rate_limit';
     const query = `
@@ -75,6 +88,7 @@ app.get('/api/status', async (req, res) => {
       FROM rate_limits 
       WHERE key = $1
     `;
+    
     const result = await pool.query(query, [rateLimitKey]);
     const now = new Date();
 
@@ -83,15 +97,33 @@ app.get('/api/status', async (req, res) => {
       const resetTime = new Date(limit.value);
       
       if (resetTime > now) {
+        const waitSeconds = Math.max(0, Math.ceil((resetTime - now) / 1000));
         return res.json({
           status: 'rate_limited',
           resetTime: resetTime.toISOString(),
-          waitSeconds: Math.max(0, Math.ceil((resetTime - now) / 1000)),
-          waitTime: getHumanReadableDuration(Math.max(0, Math.ceil((resetTime - now) / 1000))),
-          message: `API is rate limited. Please wait ${getHumanReadableDuration(Math.max(0, Math.ceil((resetTime - now) / 1000)))} before making new requests.`,
+          waitSeconds: waitSeconds,
+          waitTime: getHumanReadableDuration(waitSeconds),
+          message: `API is rate limited. Please wait ${getHumanReadableDuration(waitSeconds)} before making new requests.`,
           nextAttempt: resetTime.toISOString()
         });
       }
+    }
+
+    // Check Twitter API credentials
+    const credentials = {
+      hasApiKey: !!process.env.TWITTER_API_KEY,
+      hasApiSecret: !!process.env.TWITTER_API_SECRET,
+      hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
+      hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
+    };
+
+    if (!Object.values(credentials).every(Boolean)) {
+      return res.status(503).json({
+        status: 'error',
+        message: 'Missing Twitter API credentials',
+        details: credentials,
+        currentTime: now.toISOString()
+      });
     }
 
     // Check if we have cached data for a common symbol
@@ -111,6 +143,7 @@ app.get('/api/status', async (req, res) => {
       status: 'error',
       message: 'Error checking API status',
       error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       currentTime: new Date().toISOString()
     });
   }
