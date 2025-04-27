@@ -77,7 +77,8 @@ async function testTwitterClient() {
   try {
     console.log('Testing Twitter client with a sample query...');
     const testQuery = '$BTC -is:retweet';
-    const result = await twitterClient.v2.tweetCountsRecent(testQuery, {
+    const result = await twitterClient.v2.tweets.countRecent({
+      query: testQuery,
       granularity: 'hour',
       start_time: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString() // Last hour only
     });
@@ -639,7 +640,10 @@ app.get('/api/verify-credentials', async (req, res) => {
     });
 
     // Try a simple search
-    const result = await client.v2.tweetCountsRecent('$BTC');
+    const result = await client.v2.tweets.countRecent({
+      query: '$BTC',
+      granularity: 'hour'
+    });
     
     res.json({
       status: 'success',
@@ -667,7 +671,7 @@ app.get('/api/verify-credentials', async (req, res) => {
   }
 });
 
-// Update the v2 mentions endpoint to use better error handling
+// Update the v2 mentions endpoint to use the correct method
 app.get('/api/v2/mentions', async (req, res) => {
   console.log('V2 Mentions endpoint called with params:', req.query);
   
@@ -678,7 +682,9 @@ app.get('/api/v2/mentions', async (req, res) => {
 
   // Format the symbol
   const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
-  console.log('Formatted symbol:', formattedSymbol);
+  const symbolWithoutDollar = formattedSymbol.replace('$', '');
+  const searchQuery = `(${formattedSymbol} OR ${symbolWithoutDollar}) -is:retweet lang:en`;
+  console.log('Search query:', searchQuery);
 
   try {
     // Try to get real Twitter data
@@ -690,7 +696,8 @@ app.get('/api/v2/mentions', async (req, res) => {
       accessSecret: process.env.TWITTER_ACCESS_SECRET,
     });
 
-    const tweets = await client.v2.tweetCountsRecent(formattedSymbol, {
+    const tweets = await client.v2.tweets.countRecent({
+      query: searchQuery,
       granularity: 'hour',
       start_time: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() // Last 24 hours
     });
@@ -716,6 +723,17 @@ app.get('/api/v2/mentions', async (req, res) => {
         period: '24 hours'
       });
     }
+
+    // If no data found, return empty results
+    return res.json({
+      timestamps: [],
+      counts: [],
+      totalMentions: 0,
+      source: 'twitter',
+      period: '24 hours',
+      message: 'No mentions found in the last 24 hours'
+    });
+
   } catch (error) {
     console.error('Twitter API error:', {
       message: error.message,
