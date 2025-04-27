@@ -121,55 +121,9 @@ function getHumanReadableDuration(seconds) {
 
 // Status endpoint to check API availability
 app.get('/api/status', async (req, res) => {
-  let client;
   console.log('Status endpoint called at:', new Date().toISOString());
   try {
-    // First check if database is accessible
-    console.log('Checking database connection...');
-    client = await pool.connect();
-    await client.query('SELECT NOW()');
-    console.log('Database connection successful');
-
-    // Direct database query to get current rate limit status without affecting it
-    console.log('Checking rate limit status...');
-    const rateLimitKey = 'twitter_rate_limit';
-    const query = `
-      SELECT value, updated_at, attempts 
-      FROM rate_limits 
-      WHERE key = $1
-    `;
-    
-    const result = await client.query(query, [rateLimitKey]);
-    console.log('Rate limit query result:', result.rows);
-    const now = new Date();
-
-    if (result.rows.length > 0) {
-      const limit = result.rows[0];
-      const resetTime = new Date(limit.value);
-      console.log('Found rate limit entry:', {
-        resetTime: resetTime.toISOString(),
-        now: now.toISOString(),
-        isLimited: resetTime > now
-      });
-      
-      if (resetTime > now) {
-        const waitSeconds = Math.max(0, Math.ceil((resetTime - now) / 1000));
-        console.log('Rate limit is active:', {
-          waitSeconds,
-          waitTime: getHumanReadableDuration(waitSeconds)
-        });
-        return res.json({
-          status: 'rate_limited',
-          resetTime: resetTime.toISOString(),
-          waitSeconds: waitSeconds,
-          waitTime: getHumanReadableDuration(waitSeconds),
-          message: `API is rate limited. Please wait ${getHumanReadableDuration(waitSeconds)} before making new requests.`,
-          nextAttempt: resetTime.toISOString()
-        });
-      }
-    }
-
-    // Check Twitter API credentials
+    // Check Twitter API credentials first (no database required)
     console.log('Checking Twitter API credentials...');
     const credentials = {
       hasApiKey: !!process.env.TWITTER_API_KEY,
@@ -180,53 +134,51 @@ app.get('/api/status', async (req, res) => {
     console.log('Credentials status:', credentials);
 
     if (!Object.values(credentials).every(Boolean)) {
-      console.log('Missing Twitter API credentials');
       return res.status(503).json({
         status: 'error',
         message: 'Missing Twitter API credentials',
         details: credentials,
-        currentTime: now.toISOString()
+        currentTime: new Date().toISOString()
       });
     }
 
-    // Check if we have cached data for a common symbol
-    console.log('Checking for cached BTC data...');
-    const btcData = await getCachedData('$BTC', 1);
-    console.log('Cache check complete:', {
-      hasCachedData: btcData.length > 0,
-      cachedDataPoints: btcData.length
-    });
-    
-    console.log('Status check completed successfully');
+    // Simple database check
+    try {
+      console.log('Attempting simple database connection test...');
+      await pool.query('SELECT NOW()');
+      console.log('Database connection successful');
+    } catch (dbError) {
+      console.error('Database connection failed:', {
+        message: dbError.message,
+        code: dbError.code
+      });
+      return res.status(503).json({
+        status: 'error',
+        message: 'Database connection failed',
+        error: dbError.message,
+        currentTime: new Date().toISOString()
+      });
+    }
+
+    // If we get here, both basic checks passed
     res.json({
       status: 'available',
-      hasCachedData: btcData.length > 0,
-      message: 'API is available for requests',
-      cachedSymbols: btcData.length > 0 ? ['$BTC'] : [],
-      currentTime: now.toISOString()
+      message: 'Basic connectivity checks passed',
+      currentTime: new Date().toISOString()
     });
 
   } catch (error) {
     console.error('Status check error:', {
       message: error.message,
       code: error.code,
-      stack: error.stack,
       type: error.constructor.name
     });
     res.status(500).json({
       status: 'error',
-      message: 'Error checking API status',
+      message: 'Error during basic connectivity check',
       error: error.message,
-      details: {
-        code: error.code,
-        type: error.constructor.name
-      },
       currentTime: new Date().toISOString()
     });
-  } finally {
-    if (client) {
-      client.release();
-    }
   }
 });
 
