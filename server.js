@@ -11,7 +11,6 @@ const port = process.env.PORT || 5000;
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'client/build')));
 
 // Initialize Twitter client
 const twitterClient = new TwitterApi({
@@ -132,12 +131,14 @@ app.get('/api/mentions', async (req, res) => {
   }
 });
 
-// Serve static files in production
-if (process.env.NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
-  });
-}
+// Serve static files from the React app
+app.use(express.static(path.join(__dirname, 'client/build')));
+
+// The "catchall" handler: for any request that doesn't
+// match one above, send back React's index.html file.
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
+});
 
 // Start server
 app.listen(port, () => {
