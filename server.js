@@ -611,34 +611,66 @@ app.get('/api/test-mentions', async (req, res) => {
   res.json(testData);
 });
 
-// Combined endpoint that tries Twitter API first, falls back to test data
+// Function to safely show part of a credential
+function maskCredential(credential) {
+  if (!credential) return 'not set';
+  if (credential.length <= 8) return '***';
+  return `${credential.substring(0, 4)}...${credential.substring(credential.length - 4)}`;
+}
+
+// Add credential verification endpoint
+app.get('/api/verify-credentials', async (req, res) => {
+  const credentials = {
+    TWITTER_API_KEY: maskCredential(process.env.TWITTER_API_KEY),
+    TWITTER_API_SECRET: maskCredential(process.env.TWITTER_API_SECRET),
+    TWITTER_ACCESS_TOKEN: maskCredential(process.env.TWITTER_ACCESS_TOKEN),
+    TWITTER_ACCESS_SECRET: maskCredential(process.env.TWITTER_ACCESS_SECRET)
+  };
+
+  console.log('Credential verification:', credentials);
+
+  // Try to make a simple API call
+  try {
+    const client = new TwitterApi({
+      appKey: process.env.TWITTER_API_KEY,
+      appSecret: process.env.TWITTER_API_SECRET,
+      accessToken: process.env.TWITTER_ACCESS_TOKEN,
+      accessSecret: process.env.TWITTER_ACCESS_SECRET,
+    });
+
+    // Try a simple search
+    const result = await client.v2.tweetCountsRecent('$BTC');
+    
+    res.json({
+      status: 'success',
+      credentials: credentials,
+      testQuery: {
+        success: true,
+        meta: result.meta
+      }
+    });
+  } catch (error) {
+    console.error('Twitter API test error:', {
+      message: error.message,
+      code: error.code,
+      data: error.data
+    });
+
+    res.json({
+      status: 'error',
+      credentials: credentials,
+      error: {
+        message: error.message,
+        code: error.code
+      }
+    });
+  }
+});
+
+// Update the v2 mentions endpoint to use better error handling
 app.get('/api/v2/mentions', async (req, res) => {
   console.log('V2 Mentions endpoint called with params:', req.query);
   
-  // Check Twitter credentials first
-  const credentials = {
-    hasApiKey: !!process.env.TWITTER_API_KEY,
-    hasApiSecret: !!process.env.TWITTER_API_SECRET,
-    hasAccessToken: !!process.env.TWITTER_ACCESS_TOKEN,
-    hasAccessSecret: !!process.env.TWITTER_ACCESS_SECRET
-  };
-  
-  const missingCredentials = Object.entries(credentials)
-    .filter(([_, hasValue]) => !hasValue)
-    .map(([key]) => key);
-
-  if (missingCredentials.length > 0) {
-    console.error('Missing Twitter credentials:', missingCredentials.join(', '));
-    return res.json({
-      timestamps: [new Date().toISOString()],
-      counts: [0],
-      totalMentions: 0,
-      source: 'error',
-      period: 'n/a',
-      error: `Twitter API credentials not configured. Missing: ${missingCredentials.join(', ')}`
-    });
-  }
-
   const symbol = req.query.symbol;
   if (!symbol) {
     return res.status(400).json({ error: 'Symbol is required' });
@@ -648,30 +680,24 @@ app.get('/api/v2/mentions', async (req, res) => {
   const formattedSymbol = symbol.startsWith('$') ? symbol : `$${symbol}`;
   console.log('Formatted symbol:', formattedSymbol);
 
-  // Log Twitter credentials status
-  console.log('Twitter credentials status:', credentials);
-
   try {
-    // Verify Twitter client
-    if (!twitterClient) {
-      throw new Error('Twitter client not initialized');
-    }
-    console.log('Twitter client initialized');
-
     // Try to get real Twitter data
     console.log('Attempting to fetch Twitter data...');
-    const query = `${formattedSymbol} -is:retweet`;
-    console.log('Search query:', query);
+    const client = new TwitterApi({
+      appKey: process.env.TWITTER_API_KEY,
+      appSecret: process.env.TWITTER_API_SECRET,
+      accessToken: process.env.TWITTER_ACCESS_TOKEN,
+      accessSecret: process.env.TWITTER_ACCESS_SECRET,
+    });
 
-    const tweets = await twitterClient.v2.tweetCountsRecent(query, {
+    const tweets = await client.v2.tweetCountsRecent(formattedSymbol, {
       granularity: 'hour',
       start_time: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() // Last 24 hours
     });
 
     console.log('Twitter API response:', {
       meta: tweets.meta,
-      dataLength: tweets.data?.length,
-      data: tweets.data ? tweets.data.slice(0, 2) : null // Log first two entries if available
+      dataLength: tweets.data?.length
     });
 
     if (tweets.data && tweets.data.length > 0) {
@@ -682,13 +708,6 @@ app.get('/api/v2/mentions', async (req, res) => {
 
       const totalMentions = processedData.reduce((sum, d) => sum + d.count, 0);
 
-      console.log('Successfully processed Twitter data:', {
-        dataPoints: processedData.length,
-        totalMentions,
-        firstPoint: processedData[0],
-        lastPoint: processedData[processedData.length - 1]
-      });
-
       return res.json({
         timestamps: processedData.map(d => d.timestamp),
         counts: processedData.map(d => d.count),
@@ -696,42 +715,35 @@ app.get('/api/v2/mentions', async (req, res) => {
         source: 'twitter',
         period: '24 hours'
       });
-    } else {
-      console.log('No Twitter data found, falling back to test data');
     }
   } catch (error) {
-    console.error('Twitter API error details:', {
+    console.error('Twitter API error:', {
       message: error.message,
       code: error.code,
-      status: error.status,
-      rateLimitError: error.rateLimitError,
       data: error.data,
-      stack: error.stack,
       type: error.constructor.name
     });
+
+    // Return test data with error information
+    const testData = {
+      timestamps: [
+        new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
+        new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
+        new Date(Date.now() - 4 * 3600 * 1000).toISOString(),
+        new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+        new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+        new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
+        new Date().toISOString()
+      ],
+      counts: [10, 15, 20, 25, 30, 35, 40],
+      totalMentions: 175,
+      source: 'test (Twitter API error)',
+      period: '6 hours',
+      error: `Twitter API error: ${error.message}`
+    };
+
+    res.json(testData);
   }
-
-  // If we get here, either there was an error or no data was found
-  // Return test data as fallback
-  console.log('Returning test data as fallback');
-  const testData = {
-    timestamps: [
-      new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
-      new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
-      new Date(Date.now() - 4 * 3600 * 1000).toISOString(),
-      new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
-      new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
-      new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
-      new Date().toISOString()
-    ],
-    counts: [10, 15, 20, 25, 30, 35, 40],
-    totalMentions: 175,
-    source: 'test (Twitter API unavailable)',
-    period: '6 hours',
-    error: 'Twitter API error - check server logs for details'
-  };
-
-  res.json(testData);
 });
 
 // Add a credentials check endpoint

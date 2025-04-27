@@ -99,16 +99,20 @@ function App() {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    
+    setData(null);
+
     try {
-      // Try the new v2 endpoint
-      const response = await axios.get(`${API_BASE_URL}/api/v2/mentions`, {
-        params: { symbol }
-      });
-      setData(response.data);
+      const response = await fetch(`${API_BASE_URL}/api/v2/mentions?symbol=${encodeURIComponent(symbol)}`);
+      const result = await response.json();
+      
+      if (result.error) {
+        setError(result.error);
+      } else {
+        setData(result);
+      }
     } catch (err) {
-      console.error('API Error:', err.message);
       setError('Failed to fetch data. Please try again.');
+      console.error('Error fetching data:', err);
     } finally {
       setLoading(false);
     }
@@ -155,69 +159,92 @@ function App() {
   };
 
   return (
-    <div className="App">
-      <header>
-        <h1>Crypto Sentiment Analyzer</h1>
-        {credentialsStatus && credentialsStatus.status !== 'configured' && (
-          <div className="api-status error">
-            <p>⚠️ {credentialsStatus.message}</p>
-            <p className="status-note">Twitter API credentials need to be configured</p>
-          </div>
-        )}
-        {apiStatus && (
-          <div className={`api-status ${apiStatus.status}`}>
-            <p>{apiStatus.message}</p>
-            {apiStatus.status === 'rate_limited' && (
-              <>
-                <p>Next attempt available: {new Date(apiStatus.nextAttempt).toLocaleTimeString()}</p>
-                <p className="status-note">(Status updates automatically)</p>
-              </>
-            )}
-            {apiStatus.status === 'available' && (
-              <p className="status-note">Ready to analyze crypto mentions</p>
-            )}
-          </div>
-        )}
-      </header>
-      <main>
-        <form onSubmit={handleSubmit}>
-          <input
-            type="text"
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
-            placeholder="Enter crypto symbol (e.g., $ETH)"
-            required
-          />
-          <button 
-            type="submit" 
-            disabled={loading || (apiStatus?.status === 'rate_limited')}
-          >
-            {loading ? 'Loading...' : 'Analyze'}
-          </button>
-        </form>
-        
-        {error && (
-          <div className="error">
-            <p>{error.message}</p>
-            {error.waitTime && (
-              <p>Next attempt available at: {new Date(error.nextAttempt).toLocaleTimeString()}</p>
-            )}
-          </div>
-        )}
-        
-        {data && (
-          <div className="chart-container">
-            <Line data={chartData} options={options} />
-            {data.totalMentions !== undefined && (
-              <div className="stats">
-                <p>Total mentions: {data.totalMentions}</p>
-                <p>Data source: {data.source}</p>
-                <p>Time period: {data.period}</p>
-              </div>
-            )}
-          </div>
-        )}
-      </main>
+    <div className="container mx-auto px-4 py-8">
+      <h1 className="text-4xl font-bold mb-8 text-center">Crypto Sentiment Analyzer</h1>
+      
+      {credentialsStatus?.status === 'error' && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4">
+          <strong className="font-bold">Twitter API Error: </strong>
+          <span className="block sm:inline">{credentialsStatus.error.message}</span>
+        </div>
+      )}
+
+      {credentialsStatus?.status === 'success' && (
+        <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4">
+          <strong className="font-bold">Twitter API Connected Successfully</strong>
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="mb-8">
+        <input
+          type="text"
+          value={symbol}
+          onChange={(e) => setSymbol(e.target.value)}
+          placeholder="Enter crypto symbol (e.g., $ETH)"
+          required
+        />
+        <button 
+          type="submit" 
+          disabled={loading || (apiStatus?.status === 'rate_limited')}
+        >
+          {loading ? 'Loading...' : 'Analyze'}
+        </button>
+      </form>
+
+      {error && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4">
+          <strong className="font-bold">Error: </strong>
+          <span className="block sm:inline">{error}</span>
+        </div>
+      )}
+
+      {loading && (
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-gray-900 mx-auto"></div>
+        </div>
+      )}
+
+      {data && !error && (
+        <div className="bg-white rounded-lg shadow-lg p-6">
+          <h2 className="text-2xl font-bold mb-4">Results for {symbol}</h2>
+          <p className="mb-4">
+            Total Mentions: <span className="font-bold">{data.totalMentions}</span>
+            <br />
+            Period: <span className="font-bold">{data.period}</span>
+            <br />
+            Source: <span className="font-bold">{data.source}</span>
+          </p>
+          
+          {/* Add chart here */}
+          {data.timestamps && data.counts && (
+            <div className="h-64">
+              <Line
+                data={{
+                  labels: data.timestamps.map(t => new Date(t).toLocaleString()),
+                  datasets: [
+                    {
+                      label: 'Mentions',
+                      data: data.counts,
+                      fill: false,
+                      borderColor: 'rgb(75, 192, 192)',
+                      tension: 0.1
+                    }
+                  ]
+                }}
+                options={{
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  scales: {
+                    y: {
+                      beginAtZero: true
+                    }
+                  }
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
